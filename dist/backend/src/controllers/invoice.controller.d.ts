@@ -1,0 +1,11 @@
+import { Response } from 'express';
+import { AuthRequest } from '../types/index.js';
+export declare const listInvoices: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const getInvoiceSummary: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const getInvoiceById: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const approveInvoice: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const rejectInvoice: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const createClientInvoiceHandler: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const sendClientInvoice: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const approveProjectInstalment: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const getInvoicePdfData: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;

@@ -1,0 +1,10 @@
+import { Response } from 'express';
+import { AuthRequest } from '../types/index.js';
+export declare const listEmployees: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const getEmployee: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const createEmployee: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const updateEmployee: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const updateEmployeeRole: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const updateEmployeeStatus: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const resetEmployeePassword: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const deleteEmployee: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;

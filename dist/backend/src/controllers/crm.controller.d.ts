@@ -1,0 +1,11 @@
+import { Response } from 'express';
+import { AuthRequest } from '../types/index.js';
+export declare const createCustomer: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const listCustomers: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const getCustomer: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const getCustomerInvoices: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const updateCustomer: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const deleteCustomer: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const listCustomerPurchases: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const addCustomerPurchase: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const deleteCustomerPurchase: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;

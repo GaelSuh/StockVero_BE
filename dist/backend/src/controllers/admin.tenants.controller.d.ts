@@ -1,0 +1,14 @@
+import { Response } from 'express';
+import { AdminRequest } from '../types/index.js';
+export declare const listTenants: (req: AdminRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const createTenant: (req: AdminRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const getTenant: (req: AdminRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const updateTenant: (req: AdminRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const approveTenant: (req: AdminRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const denyTenant: (req: AdminRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const updateTenantStatus: (req: AdminRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const deleteTenant: (req: AdminRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const getTenantModules: (req: AdminRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const updateTenantModules: (req: AdminRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const updateTenantOwner: (req: AdminRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const resetTenantOwnerPassword: (req: AdminRequest, res: Response) => Promise<Response<any, Record<string, any>>>;

@@ -1,0 +1,12 @@
+import { Response } from 'express';
+import { AuthRequest } from '../types/index.js';
+export declare const getBillingOverview: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const getBillingModules: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const addBillingModule: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const removeBillingModule: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const cancelModuleRemoval: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const getPaymentMethod: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const updatePaymentMethod: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const requestBillingCycleChange: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const getBillingTransactions: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const cancelSubscription: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
