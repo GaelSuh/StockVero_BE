@@ -307,7 +307,7 @@ export const createTenant = async (req: AdminRequest, res: Response) => {
         },
       });
 
-      const priceMap = new Map(PRICING_MODULES.map((m) => [m.key, m.monthlyPrice]));
+      const priceMap = new Map<string, number>(PRICING_MODULES.map((m) => [m.key, m.monthlyPrice]));
       await tx.subscriptionModule.createMany({
         data: uniqueModules.map((key) => ({
           tenantId: createdTenant.id,
@@ -357,7 +357,7 @@ export const createTenant = async (req: AdminRequest, res: Response) => {
 
 export const getTenant = async (req: AdminRequest, res: Response) => {
   try {
-    const tenant = await prisma.tenant.findUnique({
+    const tenant: any = await prisma.tenant.findUnique({
       where: { id: req.params.id },
       include: {
         users: {
@@ -568,7 +568,7 @@ export const updateTenant = async (req: AdminRequest, res: Response) => {
 
 export const approveTenant = async (req: AdminRequest, res: Response) => {
   try {
-    const tenant = await prisma.tenant.findUnique({
+    const tenant: any = await prisma.tenant.findUnique({
       where: { id: req.params.id },
       include: { subscription: true, users: true },
     });
@@ -689,7 +689,7 @@ export const denyTenant = async (req: AdminRequest, res: Response) => {
       });
     }
 
-    const tenant = await prisma.tenant.findUnique({
+    const tenant: any = await prisma.tenant.findUnique({
       where: { id: req.params.id },
       include: { subscription: true, users: true },
     });
@@ -768,7 +768,7 @@ export const updateTenantStatus = async (req: AdminRequest, res: Response) => {
       });
     }
 
-    const tenant = await prisma.tenant.findUnique({
+    const tenant: any = await prisma.tenant.findUnique({
       where: { id: req.params.id },
       include: { users: true },
     });
@@ -872,7 +872,7 @@ export const deleteTenant = async (req: AdminRequest, res: Response) => {
       });
     }
 
-    const tenant = await prisma.tenant.findUnique({
+    const tenant: any = await prisma.tenant.findUnique({
       where: { id: req.params.id },
       include: {
         users: true,

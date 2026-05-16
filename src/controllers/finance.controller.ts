@@ -155,7 +155,7 @@ export const getTransaction = async (req: AuthRequest, res: Response) => {
     }
 
     // Fetch invoice (no prisma relation defined on Transaction model)
-    let invoice = null;
+    let invoice: any = null;
     if (tx.invoiceId) {
       invoice = await (prisma as any).invoice.findUnique({
         where: { id: tx.invoiceId },
@@ -173,7 +173,7 @@ export const getTransaction = async (req: AuthRequest, res: Response) => {
     }
 
     // If invoicePayment links to an invoice but tx.invoiceId is not set, fetch that invoice too
-    let invoicePaymentInvoice = null;
+    let invoicePaymentInvoice: any = null;
     if (!invoice && tx.invoicePayment?.invoiceId) {
       invoicePaymentInvoice = await (prisma as any).invoice.findUnique({
         where: { id: tx.invoicePayment.invoiceId },

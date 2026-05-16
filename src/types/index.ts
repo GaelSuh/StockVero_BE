@@ -51,7 +51,7 @@ export interface AuthRequest extends Request<Record<string, string>> {
   file?: Express.Multer.File;
 }
 
-export interface AdminRequest extends Request {
+export interface AdminRequest extends Request<Record<string, string>> {
   admin?: {
     id: string;
     email: string;

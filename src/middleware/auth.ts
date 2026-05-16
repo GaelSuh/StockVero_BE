@@ -145,7 +145,7 @@ export function adminGuard(req: AuthRequest, res: Response, next: NextFunction) 
 
 export function roleGuard(roles: UserRole[]) {
   return (req: AuthRequest, res: Response, next: NextFunction) => {
-    if (!req.user || !roles.includes(req.user.role)) {
+    if (!req.user || !roles.includes(req.user.role!)) {
       throw new ForbiddenError('Insufficient permissions');
     }
     next();

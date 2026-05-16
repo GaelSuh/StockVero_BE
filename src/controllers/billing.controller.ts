@@ -109,7 +109,7 @@ export const getBillingOverview = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const moduleMap = new Map(PRICING_MODULES.map((m) => [m.key, m]));
+    const moduleMap = new Map<string, (typeof PRICING_MODULES)[number]>(PRICING_MODULES.map((m) => [m.key, m]));
     const modules = tenant.subscriptionModules.map((mod) => ({
       id: mod.id,
       moduleKey: mod.moduleKey,

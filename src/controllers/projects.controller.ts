@@ -15,7 +15,7 @@ async function getExistingPendingEntry(
   sourceId: string,
   transactionType: string,
 ) {
-  return prisma.financeValidationQueue.findFirst({
+  return (prisma as any).financeValidationQueue.findFirst({
     where: {
       tenantId,
       sourceType,
@@ -1573,6 +1573,7 @@ export const updateMaterial = async (req: AuthRequest, res: Response) => {
         include: {
           project: {
             select: {
+              id: true,
               isLocked: true,
               name: true,
               spent: true,
@@ -1754,7 +1755,7 @@ export const updateMaterial = async (req: AuthRequest, res: Response) => {
           const description = isFromInventory
             ? `Inventory deployed on project ${result.projectName}: ${result.updated.quantity} × ${result.updated.name} at ${Number(result.updated.unitCost)} XAF. Value delivered to client.`
             : `External material purchased for project ${result.projectName}: ${result.updated.quantity} × ${result.updated.name} at ${Number(result.updated.unitCost)} XAF.`;
-          await prisma.financeValidationQueue.update({
+          await (prisma as any).financeValidationQueue.update({
             where: { id: pendingEntry.id },
             data: {
               projectedAmount: totalCost as any,
@@ -1780,7 +1781,7 @@ export const updateMaterial = async (req: AuthRequest, res: Response) => {
                 ? `Inventory value reduced on project ${result.projectName}: ${result.updated.name} decreased by ${deltaAmount} XAF. Less value delivered to client.`
                 : `External material cost reduced on project ${result.projectName}: ${result.updated.name} decreased by ${deltaAmount} XAF. Cost saving.`);
           const category = deltaType === 'INCOME' ? 'Materials Revenue' : 'Materials';
-          await prisma.financeValidationQueue.create({
+          await (prisma as any).financeValidationQueue.create({
             data: {
               tenantId: req.tenantId!,
               type: deltaType as any,
@@ -1837,6 +1838,7 @@ export const deleteMaterial = async (req: AuthRequest, res: Response) => {
         include: {
           project: {
             select: {
+              id: true,
               isLocked: true,
               name: true,
               spent: true,
@@ -1944,7 +1946,7 @@ export const deleteMaterial = async (req: AuthRequest, res: Response) => {
     });
 
     try {
-      await prisma.financeValidationQueue.updateMany({
+      await (prisma as any).financeValidationQueue.updateMany({
         where: {
           tenantId: req.tenantId!,
           sourceModule: 'PROJECT',
@@ -2057,7 +2059,7 @@ export const removeMaterialItem = async (req: AuthRequest, res: Response) => {
       try {
         const pendingEntry = await getExistingPendingEntry(req.tenantId!, 'PROJECT', materialId, 'INCOME');
         if (pendingEntry) {
-          await prisma.financeValidationQueue.update({
+          await (prisma as any).financeValidationQueue.update({
             where: { id: pendingEntry.id },
             data: { projectedAmount: Number(result.updatedMaterial.totalCost) as any },
           });

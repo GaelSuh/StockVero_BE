@@ -37,7 +37,7 @@ export function calculateProrationAmount(params: {
 
 export async function recalcSubscriptionAmounts(
   tenantId: string,
-  tx: typeof prisma = prisma,
+  tx: any = prisma,
 ) {
   const tenant = await tx.tenant.findUnique({
     where: { id: tenantId },
@@ -86,7 +86,7 @@ export function buildSubscriptionModulePayload(moduleKey: string) {
 export async function ensureTenantModuleEnabled(
   tenantId: string,
   moduleKey: string,
-  tx: typeof prisma = prisma,
+  tx: any = prisma,
 ) {
   await tx.tenantModule.upsert({
     where: { tenantId_moduleKey: { tenantId, moduleKey } },
