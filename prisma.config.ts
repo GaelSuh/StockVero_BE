@@ -5,10 +5,10 @@ import { defineConfig } from 'prisma/config';
 const rootDir = process.cwd();
 
 // Prisma config does not auto-load .env files, so we do it here.
-const envFiles = ['.env.example', '.env', '.env.local'];
-for (const filename of envFiles) {
-  loadEnv({ path: path.join(rootDir, filename), override: true });
-}
+// Load .env.example as defaults (no override), then .env/.env.local can override.
+loadEnv({ path: path.join(rootDir, '.env.example') });
+loadEnv({ path: path.join(rootDir, '.env'), override: true });
+loadEnv({ path: path.join(rootDir, '.env.local'), override: true });
 
 // Prisma v7 no longer supports directUrl in schema. Prefer DIRECT_URL for CLI ops.
 const databaseUrl = (process.env.DIRECT_URL ?? process.env.DATABASE_URL)?.trim();
