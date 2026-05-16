@@ -491,7 +491,7 @@ export const addCustomerPurchase = async (req: AuthRequest, res: Response) => {
         eventType: 'SOLD',
         delta: -quantity,
         title: `Sold ${quantity} unit(s) to customer`,
-        performedBy: req.userId ?? null,
+        performedBy: req.user?.id ?? null,
       }).catch(() => {});
 
       return res.status(201).json({ success: true, message: 'Purchase recorded successfully', data: purchase });
@@ -562,7 +562,7 @@ export const deleteCustomerPurchase = async (req: AuthRequest, res: Response) =>
         eventType: 'RETURNED',
         delta: purchase.quantity,
         title: `Reversed sale of ${purchase.quantity} unit(s) (purchase deleted)`,
-        performedBy: req.userId ?? null,
+        performedBy: req.user?.id ?? null,
       }).catch(() => {});
 
       return res.json({ success: true, message: 'Purchase deleted successfully' });

@@ -29,7 +29,7 @@ export declare const PRICING_MODULES: readonly [{
     readonly description: "Business insights and reporting";
     readonly monthlyPrice: 3500;
 }];
-export declare const PRICING_MODULE_KEYS: ("dashboard" | "inventory" | "crm" | "projects" | "finance" | "analytics")[];
+export declare const PRICING_MODULE_KEYS: string[];
 export declare const ORGANISATION_SIZE_SURCHARGES: {
     readonly "1-10": {
         readonly label: "1-10 employees";

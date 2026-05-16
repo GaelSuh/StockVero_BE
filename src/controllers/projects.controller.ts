@@ -9,6 +9,23 @@ import { getProjectAccessRecipients } from '../utils/projectRecipients.js';
 import { checkSufficientFunds, recordExpense, reverseExpense } from '../services/balanceService.js';
 import { logAudit, extractRequestContext, buildDiff, AuditActorType } from '../services/auditService.js';
 
+async function getExistingPendingEntry(
+  tenantId: string,
+  sourceType: string,
+  sourceId: string,
+  transactionType: string,
+) {
+  return prisma.financeValidationQueue.findFirst({
+    where: {
+      tenantId,
+      sourceType,
+      sourceId,
+      transactionType,
+      status: 'PENDING',
+    },
+  });
+}
+
 const ProjectSchema = z.object({
   customerId: z.string().uuid().nullable().optional(),
   name: z.string().min(1),

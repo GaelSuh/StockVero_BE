@@ -113,7 +113,7 @@ const UpdateTenantThemeSchema = z.object({
     themeKey: z.string().optional(),
     primaryColor: z.string().optional(),
     accentColor: z.string().optional(),
-    customTokens: z.record(z.string()).optional(),
+    customTokens: z.record(z.string(), z.string()).optional(),
 });
 export const updateMyTenantTheme = async (req, res) => {
     try {

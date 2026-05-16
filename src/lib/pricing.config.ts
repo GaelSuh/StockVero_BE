@@ -37,7 +37,7 @@ export const PRICING_MODULES = [
   },
 ] as const;
 
-export const PRICING_MODULE_KEYS = PRICING_MODULES.map((m) => m.key);
+export const PRICING_MODULE_KEYS: string[] = PRICING_MODULES.map((m) => m.key);
 
 export const ORGANISATION_SIZE_SURCHARGES = {
   "1-10": { label: "1-10 employees", monthlySurcharge: 0 },

@@ -321,7 +321,7 @@ export const createTenant = async (req: AdminRequest, res: Response) => {
         await tx.tenantModule.createMany({
           data: Array.from(new Set([...uniqueModules, MODULE_KEYS.BILLING])).map(key => ({
             tenantId: createdTenant.id,
-            moduleKey: key,
+            moduleKey: key as string,
             isEnabled: true,
           })),
         });

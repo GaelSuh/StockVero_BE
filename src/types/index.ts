@@ -33,7 +33,7 @@ export interface AdminJWTPayload {
   exp?: number;
 }
 
-export interface AuthRequest extends Request {
+export interface AuthRequest extends Request<Record<string, string>> {
   user?: {
     id: string;
     email: string;

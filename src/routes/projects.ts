@@ -64,7 +64,7 @@ router.get('/', permissionGuard('projects', 'canRead'), async (req, res) => {
     const search = hasSearch ? String(req.query.search) : undefined;
     const skip = (page - 1) * limit;
 
-    const where: any = { tenantId: req.tenantId! };
+    const where: any = { tenantId: (req as any).tenantId! };
     if (status) where.status = status as any;
     if (customerId) where.customerId = customerId;
     if (search) {
