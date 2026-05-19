@@ -268,10 +268,12 @@ export async function approveInvoice(invoiceId: string, reviewerId: string) {
       // Check sufficient funds before approving expense
       await checkSufficientFunds(invoice.tenantId, Number(invoice.total));
       // Unlock the category so units can be added
-      await (tx as any).inventoryCategory.update({
-        where: { id: invoice.categoryId },
-        data: { invoiceApproved: true, approvedInvoiceId: invoiceId },
-      });
+      if (invoice.categoryId) {
+        await (tx as any).inventoryCategory.update({
+          where: { id: invoice.categoryId },
+          data: { invoiceApproved: true, approvedInvoiceId: invoiceId },
+        });
+      }
       // No expense transaction yet — money moves when units are added (deductUnitCost)
     }
 
