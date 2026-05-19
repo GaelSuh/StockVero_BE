@@ -32,6 +32,11 @@ import { startCronJobs } from './services/scheduler.js';
 const app: Express = express();
 const port = process.env.PORT || 4000;
 
+// Trust the first hop from Railway/Render's reverse proxy so that
+// express-rate-limit reads the real client IP from X-Forwarded-For
+// instead of treating every user as the same proxy IP.
+app.set('trust proxy', 1);
+
 // ── Security Headers ──────────────────────────────────────────────────────────
 app.use(helmet({
   contentSecurityPolicy: false, // CSP managed by frontend hosts
