@@ -2,14 +2,10 @@
 import { z } from 'zod';
 import { AuthRequest } from '../types/index.js';
 import { supabase, STORAGE_BUCKET, deleteStorageFiles, extractStorageKey } from '../lib/storage.js';
-import fs from 'fs';
-import path from 'path';
 
 const UploadSchema = z.object({
   context: z.enum(['inventory', 'customer', 'project', 'profile']),
 });
-
-const BASE_URL = process.env.BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
 
 export const uploadFile = async (req: AuthRequest, res: Response) => {
   try {
@@ -34,44 +30,32 @@ export const uploadFile = async (req: AuthRequest, res: Response) => {
     const filename = `${Date.now()}-${Math.random().toString(36).substring(7)}${ext}`;
     const key = `${req.tenantId}/${parsed.data.context}/${filename}`;
 
-    // Try Supabase first
-    if (supabase) {
-      const { error } = await supabase.storage.from(STORAGE_BUCKET).upload(key, req.file.buffer, {
-        contentType: req.file.mimetype,
-        upsert: false,
+    // Try Supabase upload
+    if (!supabase) {
+      return res.status(503).json({
+        success: false,
+        message: 'File storage is not configured. Please contact support.',
       });
-
-      if (!error) {
-        const { data: { publicUrl } } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(key);
-        return res.status(201).json({
-          success: true,
-          message: 'File uploaded successfully',
-          data: { url: publicUrl, key },
-        });
-      }
-
-      console.warn('[files] Supabase upload failed, falling back to local storage:', error.message);
     }
 
-    // In production, Supabase is required — local disk is ephemeral on Railway
-    if (process.env.NODE_ENV === 'production') {
+    const { error } = await supabase.storage.from(STORAGE_BUCKET).upload(key, req.file.buffer, {
+      contentType: req.file.mimetype,
+      upsert: false,
+    });
+
+    if (error) {
+      console.error('[files] Supabase upload failed:', error.message);
       return res.status(503).json({
         success: false,
         message: 'File storage is temporarily unavailable. Please try again.',
       });
     }
 
-    // Local disk fallback (development only)
-    const uploadDir = path.resolve('uploads', parsed.data.context);
-    fs.mkdirSync(uploadDir, { recursive: true });
-    const localPath = path.join(uploadDir, filename);
-    fs.writeFileSync(localPath, req.file.buffer);
-    const url = `${BASE_URL}/uploads/${parsed.data.context}/${filename}`;
-
+    const { data: { publicUrl } } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(key);
     return res.status(201).json({
       success: true,
       message: 'File uploaded successfully',
-      data: { url, key: `local/${parsed.data.context}/${filename}` },
+      data: { url: publicUrl, key },
     });
   } catch (error) {
     console.error('Error uploading file:', error);
