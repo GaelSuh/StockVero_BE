@@ -1,6 +1,5 @@
 import express, { Express, Request, Response } from 'express';
 import cors from 'cors';
-import path from 'path';
 import 'dotenv/config';
 import helmet from 'helmet';
 import compression from 'compression';
@@ -85,11 +84,6 @@ app.use(
   }),
 );
 app.use(express.json({ limit: '2mb' }));
-
-// Only serve local uploads in development — production uses Supabase Storage
-if (process.env.NODE_ENV !== 'production') {
-  app.use('/uploads', express.static(path.resolve('uploads')));
-}
 
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 

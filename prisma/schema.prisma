@@ -32,6 +32,7 @@ model Tenant {
   themeConfig                Json?                       @map("theme_config")
   createdAt                  DateTime                    @default(now()) @map("created_at")
   updatedAt                  DateTime                    @updatedAt @map("updated_at")
+  activityLogs               AuditLog[]
   categoryStockLogs          CategoryStockLog[]
   customerContacts           CustomerContact[]
   customerPurchases          CustomerPurchase[]
@@ -49,6 +50,7 @@ model Tenant {
   paymentTransactions        PaymentTransaction[]
   productItemMaintenanceLogs ProductItemMaintenanceLog[]
   productItems               ProductItem[]
+  projectAssignments         ProjectAssignment[]
   projectMaterials           ProjectMaterial[]
   projectMilestones          ProjectMilestone[]
   projects                   Project[]
@@ -57,13 +59,11 @@ model Tenant {
   subscriptionModules        SubscriptionModule[]
   subscription               Subscription?
   auditLogs                  TenantAuditLog[]
-  activityLogs               AuditLog[]
   financeBalance             TenantFinanceBalance?
   modules                    TenantModule[]
   approvedByAdmin            SuperAdmin?                 @relation("TenantApprovedBy", fields: [approvedBy], references: [id])
   transactions               Transaction[]
   users                      User[]
-  projectAssignments         ProjectAssignment[]
 
   @@map("tenants")
 }
@@ -157,25 +157,25 @@ model RolePermission {
 }
 
 model Employee {
-  id                      String    @id @default(uuid())
-  tenantId                String    @map("tenant_id")
-  roleId                  String    @map("role_id")
-  firstName               String    @map("first_name")
-  lastName                String    @map("last_name")
-  email                   String    @unique
-  passwordHash            String    @map("password_hash")
+  id                      String              @id @default(uuid())
+  tenantId                String              @map("tenant_id")
+  roleId                  String              @map("role_id")
+  firstName               String              @map("first_name")
+  lastName                String              @map("last_name")
+  email                   String              @unique
+  passwordHash            String              @map("password_hash")
   phone                   String?
-  jobTitle                String?   @map("job_title")
-  avatarUrl               String?   @map("avatar_url")
-  isActive                Boolean   @default(true) @map("is_active")
-  mustChangePassword      Boolean   @default(true) @map("must_change_password")
-  tokenVersion            Int       @default(0) @map("token_version")
-  lastLoginAt             DateTime? @map("last_login_at")
-  notificationPreferences Json?     @map("notification_preferences")
-  createdAt               DateTime  @default(now()) @map("created_at")
-  updatedAt               DateTime  @updatedAt @map("updated_at")
-  role                    Role      @relation(fields: [roleId], references: [id])
-  tenant                  Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  jobTitle                String?             @map("job_title")
+  avatarUrl               String?             @map("avatar_url")
+  isActive                Boolean             @default(true) @map("is_active")
+  mustChangePassword      Boolean             @default(true) @map("must_change_password")
+  tokenVersion            Int                 @default(0) @map("token_version")
+  lastLoginAt             DateTime?           @map("last_login_at")
+  notificationPreferences Json?               @map("notification_preferences")
+  createdAt               DateTime            @default(now()) @map("created_at")
+  updatedAt               DateTime            @updatedAt @map("updated_at")
+  role                    Role                @relation(fields: [roleId], references: [id])
+  tenant                  Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   projectAssignments      ProjectAssignment[]
 
   @@index([tenantId])
@@ -349,11 +349,11 @@ model InventoryCategory {
   createdAt         DateTime           @default(now()) @map("created_at")
   updatedAt         DateTime           @updatedAt @map("updated_at")
   stockLogs         CategoryStockLog[]
+  customerPurchases CustomerPurchase[]
   tenant            Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   invoices          Invoice[]
-  productItems       ProductItem[]
-  projectMaterials   ProjectMaterial[]  @relation("CategoryProjectMaterials")
-  customerPurchases  CustomerPurchase[]
+  productItems      ProductItem[]
+  projectMaterials  ProjectMaterial[]  @relation("CategoryProjectMaterials")
 
   @@unique([tenantId, sku])
   @@index([tenantId])
@@ -464,22 +464,22 @@ model StockMovement {
 }
 
 model Customer {
-  id             String            @id @default(uuid())
-  tenantId       String            @map("tenant_id")
+  id             String             @id @default(uuid())
+  tenantId       String             @map("tenant_id")
   name           String
   email          String?
   phone          String?
   location       String?
   address        String?
-  avatarUrl      String?           @map("avatar_url")
-  initialRevenue Decimal?          @map("initial_revenue") @db.Decimal(15, 2)
-  status         CustomerStatus    @default(ACTIVE)
+  avatarUrl      String?            @map("avatar_url")
+  initialRevenue Decimal?           @map("initial_revenue") @db.Decimal(15, 2)
+  status         CustomerStatus     @default(ACTIVE)
   notes          String?
-  createdAt      DateTime          @default(now()) @map("created_at")
-  updatedAt      DateTime          @updatedAt @map("updated_at")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
   contacts       CustomerContact[]
   purchases      CustomerPurchase[]
-  tenant         Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant         Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   projects       Project[]
 
   @@index([tenantId])
@@ -509,7 +509,6 @@ model CustomerPurchase {
   id                  String             @id @default(uuid())
   tenantId            String             @map("tenant_id")
   customerId          String             @map("customer_id")
-  inventoryCategoryId String?            @map("inventory_category_id")
   itemName            String             @map("item_name")
   quantity            Int                @default(1)
   unitPrice           Decimal            @default(0) @map("unit_price") @db.Decimal(15, 2)
@@ -518,6 +517,7 @@ model CustomerPurchase {
   purchasedAt         DateTime           @default(now()) @map("purchased_at")
   createdAt           DateTime           @default(now()) @map("created_at")
   updatedAt           DateTime           @updatedAt @map("updated_at")
+  inventoryCategoryId String?            @map("inventory_category_id")
   customer            Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
   inventoryCategory   InventoryCategory? @relation(fields: [inventoryCategoryId], references: [id])
   tenant              Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -529,34 +529,34 @@ model CustomerPurchase {
 }
 
 model Project {
-  id              String             @id @default(uuid())
-  tenantId        String             @map("tenant_id")
-  customerId      String?            @map("customer_id")
+  id              String              @id @default(uuid())
+  tenantId        String              @map("tenant_id")
+  customerId      String?             @map("customer_id")
   name            String
   description     String?
-  status          ProjectStatus      @default(PENDING)
-  progress        Int                @default(0)
-  budget          Decimal?           @db.Decimal(15, 2)
-  spent           Decimal            @default(0) @db.Decimal(15, 2)
+  status          ProjectStatus       @default(PENDING)
+  progress        Int                 @default(0)
+  budget          Decimal?            @db.Decimal(15, 2)
+  spent           Decimal             @default(0) @db.Decimal(15, 2)
   technician      String?
-  startDate       DateTime?          @map("start_date")
-  dueDate         DateTime?          @map("due_date")
-  completedAt     DateTime?          @map("completed_at")
-  isLocked        Boolean            @default(false) @map("is_locked")
-  createdAt       DateTime           @default(now()) @map("created_at")
-  updatedAt       DateTime           @updatedAt @map("updated_at")
-  availableBudget Decimal            @default(0) @map("available_budget") @db.Decimal(15, 2)
-  invoiceApproved Boolean            @default(false) @map("invoice_approved")
-  remainingBudget Decimal            @default(0) @map("remaining_budget") @db.Decimal(15, 2)
-  spentAmount     Decimal            @default(0) @map("spent_amount") @db.Decimal(15, 2)
+  startDate       DateTime?           @map("start_date")
+  dueDate         DateTime?           @map("due_date")
+  completedAt     DateTime?           @map("completed_at")
+  isLocked        Boolean             @default(false) @map("is_locked")
+  createdAt       DateTime            @default(now()) @map("created_at")
+  updatedAt       DateTime            @updatedAt @map("updated_at")
+  availableBudget Decimal             @default(0) @map("available_budget") @db.Decimal(15, 2)
+  invoiceApproved Boolean             @default(false) @map("invoice_approved")
+  remainingBudget Decimal             @default(0) @map("remaining_budget") @db.Decimal(15, 2)
+  spentAmount     Decimal             @default(0) @map("spent_amount") @db.Decimal(15, 2)
   invoices        Invoice[]
+  assignments     ProjectAssignment[]
   materials       ProjectMaterial[]
   milestones      ProjectMilestone[]
-  transactions    Transaction[]
-  customer        Customer?          @relation(fields: [customerId], references: [id])
-  tenant          Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer        Customer?           @relation(fields: [customerId], references: [id])
+  tenant          Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   stockMovements  StockMovement[]
-  assignments     ProjectAssignment[]
+  transactions    Transaction[]
 
   @@index([tenantId])
   @@index([customerId])
@@ -601,10 +601,10 @@ model ProjectMaterial {
   notes                String?
   sourceType           String?            @map("source_type")
   includeCostInProject Boolean            @default(true) @map("include_cost_in_project")
-  returnedAt           DateTime?          @map("returned_at")
-  returnNote           String?            @map("return_note")
   createdAt            DateTime           @default(now()) @map("created_at")
   updatedAt            DateTime           @updatedAt @map("updated_at")
+  returnNote           String?            @map("return_note")
+  returnedAt           DateTime?          @map("returned_at")
   category             InventoryCategory? @relation("CategoryProjectMaterials", fields: [categoryId], references: [id])
   product              InventoryItem?     @relation(fields: [productId], references: [id])
   project              Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -625,10 +625,9 @@ model ProjectAssignment {
   employeeId String   @map("employee_id")
   role       String   @default("TECHNICIAN")
   createdAt  DateTime @default(now()) @map("created_at")
-
-  project  Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  employee Employee @relation(fields: [employeeId], references: [id])
-  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  employee   Employee @relation(fields: [employeeId], references: [id])
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@unique([projectId, employeeId])
   @@index([projectId])
@@ -650,12 +649,12 @@ model Transaction {
   entityId       String?           @map("entity_id")
   isAutomatic    Boolean           @default(false) @map("is_automatic")
   invoiceId      String?           @map("invoice_id")
-  projectId      String?           @map("project_id")
-  notes          String?
   recordedAt     DateTime          @default(now()) @map("recorded_at")
   createdAt      DateTime          @default(now()) @map("created_at")
   updatedAt      DateTime          @updatedAt @map("updated_at")
   customerId     String?           @map("customer_id")
+  notes          String?
+  projectId      String?           @map("project_id")
   invoicePayment InvoicePayment?
   project        Project?          @relation(fields: [projectId], references: [id])
   tenant         Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -822,6 +821,32 @@ model Document {
   @@map("documents")
 }
 
+model AuditLog {
+  id          String         @id @default(uuid())
+  tenantId    String         @map("tenant_id")
+  actorType   AuditActorType @map("actor_type")
+  actorId     String?        @map("actor_id")
+  actorName   String?        @map("actor_name")
+  action      String
+  module      String
+  status      AuditStatus    @default(SUCCESS)
+  entityType  String?        @map("entity_type")
+  entityId    String?        @map("entity_id")
+  entityLabel String?        @map("entity_label")
+  details     Json?
+  ipAddress   String?        @map("ip_address")
+  userAgent   String?        @map("user_agent")
+  notes       String?
+  createdAt   DateTime       @default(now()) @map("created_at")
+  tenant      Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@index([tenantId, module])
+  @@index([tenantId, actorId])
+  @@index([tenantId, action])
+  @@map("audit_logs")
+}
+
 enum TenantStatus {
   PENDING_APPROVAL
   ACTIVE
@@ -911,10 +936,10 @@ enum ProductType {
 enum StockItemStatus {
   AVAILABLE
   DEPLOYED
-  SOLD
   UNDER_MAINTENANCE
   FAULTY
   COMPLETELY_BAD
+  SOLD
 }
 
 /// Status values used when the parent category is of type INVENTORY.
@@ -1015,37 +1040,4 @@ enum AuditActorType {
 enum AuditStatus {
   SUCCESS
   FAILURE
-}
-
-model AuditLog {
-  id          String         @id @default(uuid())
-  tenantId    String         @map("tenant_id")
-
-  actorType   AuditActorType @map("actor_type")
-  actorId     String?        @map("actor_id")
-  actorName   String?        @map("actor_name")
-
-  action      String
-  module      String
-  status      AuditStatus    @default(SUCCESS)
-
-  entityType  String?        @map("entity_type")
-  entityId    String?        @map("entity_id")
-  entityLabel String?        @map("entity_label")
-
-  details     Json?
-
-  ipAddress   String?        @map("ip_address")
-  userAgent   String?        @map("user_agent")
-  notes       String?
-
-  createdAt   DateTime       @default(now()) @map("created_at")
-
-  tenant      Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-
-  @@index([tenantId, createdAt(sort: Desc)])
-  @@index([tenantId, module])
-  @@index([tenantId, actorId])
-  @@index([tenantId, action])
-  @@map("audit_logs")
 }
