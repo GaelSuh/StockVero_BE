@@ -1413,6 +1413,7 @@ export const updateMaterial = async (req, res) => {
                 include: {
                     project: {
                         select: {
+                            id: true,
                             isLocked: true,
                             name: true,
                             spent: true,
@@ -1652,6 +1653,7 @@ export const deleteMaterial = async (req, res) => {
                 include: {
                     project: {
                         select: {
+                            id: true,
                             isLocked: true,
                             name: true,
                             spent: true,

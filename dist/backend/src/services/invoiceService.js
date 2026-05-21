@@ -194,11 +194,13 @@ export async function approveInvoice(invoiceId, reviewerId) {
         if (invoice.type === 'PURCHASE') {
             // Check sufficient funds before approving expense
             await checkSufficientFunds(invoice.tenantId, Number(invoice.total));
-            // Unlock the category so units can be added
-            await tx.inventoryCategory.update({
-                where: { id: invoice.categoryId },
-                data: { invoiceApproved: true, approvedInvoiceId: invoiceId },
-            });
+            // Unlock the category so units can be added (categoryId may be null for some purchase invoices)
+            if (invoice.categoryId) {
+                await tx.inventoryCategory.update({
+                    where: { id: invoice.categoryId },
+                    data: { invoiceApproved: true, approvedInvoiceId: invoiceId },
+                });
+            }
             // No expense transaction yet — money moves when units are added (deductUnitCost)
         }
         if (invoice.type === 'PROJECT') {
