@@ -1,6 +1,5 @@
 import express from 'express';
 import cors from 'cors';
-import path from 'path';
 import 'dotenv/config';
 import helmet from 'helmet';
 import compression from 'compression';
@@ -28,6 +27,10 @@ import devRoutes from './routes/dev.js';
 import { startCronJobs } from './services/scheduler.js';
 const app = express();
 const port = process.env.PORT || 4000;
+// Trust the first hop from Railway/Render's reverse proxy so that
+// express-rate-limit reads the real client IP from X-Forwarded-For
+// instead of treating every user as the same proxy IP.
+app.set('trust proxy', 1);
 // ── Security Headers ──────────────────────────────────────────────────────────
 app.use(helmet({
     contentSecurityPolicy: false, // CSP managed by frontend hosts
@@ -54,14 +57,7 @@ const apiLimiter = rateLimit({
 // ── CORS ──────────────────────────────────────────────────────────────────────
 const allowedOrigins = process.env.CORS_ORIGINS
     ? process.env.CORS_ORIGINS.split(',').map((o) => o.trim())
-    : [
-        `http://localhost:${port}`,
-        'http://localhost:5173',
-        'http://localhost:5174',
-        'http://localhost:5175',
-        'http://localhost:8080',
-        'http://localhost:3000',
-    ];
+    : ['http://localhost:5175'];
 app.use(cors({
     origin: allowedOrigins,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -69,10 +65,6 @@ app.use(cors({
     credentials: true,
 }));
 app.use(express.json({ limit: '2mb' }));
-// Only serve local uploads in development — production uses Supabase Storage
-if (process.env.NODE_ENV !== 'production') {
-    app.use('/uploads', express.static(path.resolve('uploads')));
-}
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 app.use('/api/v1/auth', authLimiter, authRoutes);
 app.use('/api/v1/inventory', apiLimiter, inventoryRoutes);

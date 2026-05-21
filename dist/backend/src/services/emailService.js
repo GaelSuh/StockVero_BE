@@ -1,9 +1,8 @@
 import { Resend } from 'resend';
 import nodemailer from 'nodemailer';
-// ── Email provider: Resend in production, Gmail SMTP as fallback ──────────────
-const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
-const RESEND_FROM = process.env.RESEND_FROM || 'SolarFlow <noreply@resend.dev>';
-const transporter = (!resend && process.env.EMAIL_HOST)
+const resend = new Resend('re_6j5VtqZn_Ayg7C9C5j98NbtU8Js6HMv8a');
+const RESEND_FROM = 'StockVero <onboarding@resend.dev>';
+const transporter = process.env.EMAIL_HOST
     ? nodemailer.createTransport({
         host: process.env.EMAIL_HOST,
         port: Number(process.env.EMAIL_PORT || 587),
@@ -12,7 +11,6 @@ const transporter = (!resend && process.env.EMAIL_HOST)
     })
     : null;
 export async function sendEmail({ to, subject, html, }) {
-    // Prefer Resend (production), fall back to SMTP (development)
     if (resend) {
         try {
             const { data, error } = await resend.emails.send({

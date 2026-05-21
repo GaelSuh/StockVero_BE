@@ -1,14 +1,11 @@
 import { Router } from 'express';
 import multer from 'multer';
-import fs from 'fs';
-import path from 'path';
 import { tenantGuard } from '../middleware/auth.js';
 import { prisma } from '../db.js';
 import { logAudit, extractRequestContext, AuditActorType } from '../services/auditService.js';
 import { supabase, STORAGE_BUCKET } from '../lib/storage.js';
 const router = Router();
 router.use(tenantGuard);
-const BASE_URL = process.env.BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
 const upload = multer({ storage: multer.memoryStorage() });
 const VALID_MODULES = ['PROJECT', 'INVENTORY', 'FINANCE', 'CUSTOMER', 'PRODUCT_ITEM'];
 const ALLOWED_MIME_TYPES = [
@@ -75,41 +72,19 @@ router.post('/upload', upload.single('file'), async (req, res) => {
     }
     const cleanName = req.file.originalname.replace(/\s+/g, '_');
     const storagePath = `${tenantId}/${sourceModule.toLowerCase()}s/${sourceId}/${Date.now()}_${cleanName}`;
-    let publicUrl = '';
-    let finalStoragePath = storagePath;
-    // Try Supabase first
-    if (supabase) {
-        const { error: uploadError } = await supabase.storage
-            .from(STORAGE_BUCKET)
-            .upload(storagePath, req.file.buffer, { contentType: req.file.mimetype });
-        if (!uploadError) {
-            const { data: urlData } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(storagePath);
-            publicUrl = urlData?.publicUrl ?? '';
-        }
-        else {
-            console.warn('[documents] Supabase upload failed, falling back to local storage:', uploadError.message);
-        }
+    if (!supabase) {
+        return res.status(503).json({ success: false, message: 'File storage is not configured. Please contact support.' });
     }
-    // In production, Supabase is required — local disk is ephemeral on Railway
-    if (!publicUrl && process.env.NODE_ENV === 'production') {
+    const { error: uploadError } = await supabase.storage
+        .from(STORAGE_BUCKET)
+        .upload(storagePath, req.file.buffer, { contentType: req.file.mimetype });
+    if (uploadError) {
+        console.error('[documents] Supabase upload failed:', uploadError.message);
         return res.status(503).json({ success: false, message: 'File storage is temporarily unavailable. Please try again.' });
     }
-    // Local disk fallback (development only)
-    if (!publicUrl) {
-        try {
-            const uploadDir = path.resolve('uploads', 'documents', sourceModule.toLowerCase(), sourceId);
-            fs.mkdirSync(uploadDir, { recursive: true });
-            const localFilename = `${Date.now()}_${cleanName}`;
-            const localPath = path.join(uploadDir, localFilename);
-            fs.writeFileSync(localPath, req.file.buffer);
-            publicUrl = `${BASE_URL}/uploads/documents/${sourceModule.toLowerCase()}/${sourceId}/${localFilename}`;
-            finalStoragePath = `local/documents/${sourceModule.toLowerCase()}/${sourceId}/${localFilename}`;
-        }
-        catch (localErr) {
-            console.error('[documents] Local fallback also failed:', localErr);
-            return res.status(500).json({ success: false, message: 'File upload failed. Please try again.' });
-        }
-    }
+    const { data: urlData } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(storagePath);
+    const publicUrl = urlData?.publicUrl ?? '';
+    const finalStoragePath = storagePath;
     const doc = await prisma.document.create({
         data: {
             tenantId,
@@ -170,10 +145,6 @@ router.get('/:id/signed-url', async (req, res) => {
         return res.status(404).json({ success: false, message: 'Document not found.' });
     if (doc.tenantId !== tenantId)
         return res.status(403).json({ success: false, message: 'Access denied.' });
-    // Local files — just return the stored URL directly
-    if (doc.storagePath.startsWith('local/')) {
-        return res.json({ success: true, data: { url: doc.url } });
-    }
     if (!supabase)
         return res.status(500).json({ success: false, message: 'Storage not configured.' });
     // 1-hour signed URL — long enough to open/download in the browser
@@ -214,16 +185,7 @@ router.delete('/:id', async (req, res) => {
         return res.status(404).json({ success: false, message: 'Document not found.' });
     if (doc.tenantId !== tenantId)
         return res.status(403).json({ success: false, message: 'Access denied.' });
-    if (doc.storagePath.startsWith('local/')) {
-        // Local file — remove from disk
-        const relativePath = doc.storagePath.replace(/^local\//, '');
-        const fullPath = path.resolve('uploads', relativePath);
-        try {
-            fs.unlinkSync(fullPath);
-        }
-        catch { /* file may already be gone */ }
-    }
-    else if (supabase) {
+    if (supabase) {
         const { error } = await supabase.storage.from(STORAGE_BUCKET).remove([doc.storagePath]);
         if (error)
             console.error('Storage delete error (continuing):', error);

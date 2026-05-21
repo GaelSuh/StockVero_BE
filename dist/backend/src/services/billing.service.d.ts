@@ -11,7 +11,7 @@ export declare function calculateProrationAmount(params: {
     periodEnd: Date;
     chargedAt?: Date;
 }): number;
-export declare function recalcSubscriptionAmounts(tenantId: string, tx?: typeof prisma): Promise<{
+export declare function recalcSubscriptionAmounts(tenantId: string, tx?: any): Promise<{
     monthlyTotal: number;
     annualTotal: number;
     organisationSizeKey: "1-10" | "11-50" | "51-200" | "201+";
@@ -23,5 +23,5 @@ export declare function recalcSubscriptionAmounts(tenantId: string, tx?: typeof 
 export declare function buildSubscriptionModulePayload(moduleKey: string): {
     monthlyPrice: 0 | 5000 | 4000 | 6000 | 5500 | 3500;
 };
-export declare function ensureTenantModuleEnabled(tenantId: string, moduleKey: string, tx?: typeof prisma): Promise<void>;
+export declare function ensureTenantModuleEnabled(tenantId: string, moduleKey: string, tx?: any): Promise<void>;
 export declare function disableTenantModule(tenantId: string, moduleKey: string, tx?: typeof prisma): Promise<void>;
