@@ -267,7 +267,7 @@ export async function approveInvoice(invoiceId: string, reviewerId: string) {
     if (invoice.type === 'PURCHASE') {
       // Check sufficient funds before approving expense
       await checkSufficientFunds(invoice.tenantId, Number(invoice.total));
-      // Unlock the category so units can be added
+      // Unlock the category so units can be added (categoryId may be null for some purchase invoices)
       if (invoice.categoryId) {
         await (tx as any).inventoryCategory.update({
           where: { id: invoice.categoryId },
