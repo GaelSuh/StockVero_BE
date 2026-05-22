@@ -41,10 +41,11 @@ app.use(helmet({
 app.use(compression());
 // ── Rate Limiting ─────────────────────────────────────────────────────────────
 const authLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 20, // 20 attempts per window
+    windowMs: 5 * 60 * 1000, // 5 minutes
+    max: 100, // 100 attempts per credential per window
     standardHeaders: true,
     legacyHeaders: false,
+    keyGenerator: (req) => `${req.ip}-${req.body?.email || 'unknown'}`,
     message: { error: 'Too many attempts. Please try again later.' },
 });
 const apiLimiter = rateLimit({
