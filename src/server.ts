@@ -49,7 +49,7 @@ app.use(compression());
 // ── Rate Limiting ─────────────────────────────────────────────────────────────
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10,                   // 10 attempts per credential per window
+  max: 100,                   // 100 attempts per credential per window
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => `${req.ip}-${req.body?.email || 'unknown'}`,
