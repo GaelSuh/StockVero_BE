@@ -63,6 +63,7 @@ model Tenant {
   modules                    TenantModule[]
   approvedByAdmin            SuperAdmin?                 @relation("TenantApprovedBy", fields: [approvedBy], references: [id])
   transactions               Transaction[]
+  userPreferences            UserPreference[]
   users                      User[]
 
   @@map("tenants")
@@ -128,6 +129,10 @@ model Role {
   abbreviation String
   description  String?
   isDefault    Boolean          @default(false) @map("is_default")
+  /// @deprecated - Legacy flag. Access to the administration module is now
+  /// controlled via RolePermission rows for moduleKey "administration".
+  /// This field will be removed in a future migration once all checks have
+  /// been migrated to the module-based permission system.
   isAdmin      Boolean          @default(false) @map("is_admin")
   createdAt    DateTime         @default(now()) @map("created_at")
   updatedAt    DateTime         @updatedAt @map("updated_at")
@@ -845,6 +850,24 @@ model AuditLog {
   @@index([tenantId, actorId])
   @@index([tenantId, action])
   @@map("audit_logs")
+}
+
+model UserPreference {
+  id          String   @id @default(uuid())
+  tenantId    String   @map("tenant_id")
+  userId      String   @map("user_id")
+  /// "OWNER" or "EMPLOYEE"
+  userType    String   @map("user_type")
+  /// Personal theme override — null means use the tenant default theme.
+  /// Same structure as tenant themeConfig: { themeKey, mode, primaryColor, accentColor, customTokens }
+  themeConfig Json?    @map("theme_config")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, userId])
+  @@index([tenantId])
+  @@map("user_preferences")
 }
 
 enum TenantStatus {
