@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { tenantGuard, mustChangePasswordGuard, adminGuard } from '../middleware/auth.js';
+import { tenantGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
 import {
   listRoles,
   getRole,
@@ -9,7 +9,7 @@ import {
 } from '../controllers/roles.controller.js';
 
 const router = Router();
-router.use(tenantGuard, mustChangePasswordGuard, adminGuard);
+router.use(tenantGuard, mustChangePasswordGuard);
 
 /**
  * @openapi
@@ -21,7 +21,7 @@ router.use(tenantGuard, mustChangePasswordGuard, adminGuard);
  *       200:
  *         description: Roles retrieved
  */
-router.get('/', listRoles);
+router.get('/', permissionGuard('administration', 'canRead'), listRoles);
 
 /**
  * @openapi
@@ -68,7 +68,7 @@ router.get('/', listRoles);
  *       201:
  *         description: Role created
  */
-router.post('/', createRole);
+router.post('/', permissionGuard('administration', 'canCreate'), createRole);
 
 /**
  * @openapi
@@ -86,7 +86,7 @@ router.post('/', createRole);
  *       200:
  *         description: Role retrieved
  */
-router.get('/:id', getRole);
+router.get('/:id', permissionGuard('administration', 'canRead'), getRole);
 
 /**
  * @openapi
@@ -139,7 +139,7 @@ router.get('/:id', getRole);
  *       200:
  *         description: Role updated
  */
-router.patch('/:id', updateRole);
+router.patch('/:id', permissionGuard('administration', 'canCreate'), updateRole);
 
 /**
  * @openapi
@@ -157,6 +157,6 @@ router.patch('/:id', updateRole);
  *       200:
  *         description: Role deleted
  */
-router.delete('/:id', deleteRole);
+router.delete('/:id', permissionGuard('administration', 'canCreate'), deleteRole);
 
 export default router;

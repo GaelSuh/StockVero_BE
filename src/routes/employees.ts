@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { tenantGuard, mustChangePasswordGuard, adminGuard } from '../middleware/auth.js';
+import { tenantGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
 import {
   listEmployees,
   getEmployee,
@@ -12,7 +12,7 @@ import {
 } from '../controllers/employees.controller.js';
 
 const router = Router();
-router.use(tenantGuard, mustChangePasswordGuard, adminGuard);
+router.use(tenantGuard, mustChangePasswordGuard);
 
 /**
  * @openapi
@@ -38,7 +38,7 @@ router.use(tenantGuard, mustChangePasswordGuard, adminGuard);
  *       200:
  *         description: Employees retrieved
  */
-router.get('/', listEmployees);
+router.get('/', permissionGuard('administration', 'canRead'), listEmployees);
 
 /**
  * @openapi
@@ -77,7 +77,7 @@ router.get('/', listEmployees);
  *       201:
  *         description: Employee created
  */
-router.post('/', createEmployee);
+router.post('/', permissionGuard('administration', 'canCreate'), createEmployee);
 
 /**
  * @openapi
@@ -95,7 +95,7 @@ router.post('/', createEmployee);
  *       200:
  *         description: Employee retrieved
  */
-router.get('/:id', getEmployee);
+router.get('/:id', permissionGuard('administration', 'canRead'), getEmployee);
 
 /**
  * @openapi
@@ -139,7 +139,7 @@ router.get('/:id', getEmployee);
  *       200:
  *         description: Employee updated
  */
-router.patch('/:id', updateEmployee);
+router.patch('/:id', permissionGuard('administration', 'canCreate'), updateEmployee);
 
 /**
  * @openapi
@@ -168,7 +168,7 @@ router.patch('/:id', updateEmployee);
  *       200:
  *         description: Employee role updated
  */
-router.patch('/:id/role', updateEmployeeRole);
+router.patch('/:id/role', permissionGuard('administration', 'canCreate'), updateEmployeeRole);
 
 /**
  * @openapi
@@ -214,7 +214,7 @@ router.patch('/:id/status', updateEmployeeStatus);
  *       200:
  *         description: Password reset
  */
-router.patch('/:id/reset-password', resetEmployeePassword);
+router.patch('/:id/reset-password', permissionGuard('administration', 'canCreate'), resetEmployeePassword);
 
 /**
  * @openapi
@@ -232,6 +232,6 @@ router.patch('/:id/reset-password', resetEmployeePassword);
  *       200:
  *         description: Employee deactivated
  */
-router.delete('/:id', deleteEmployee);
+router.delete('/:id', permissionGuard('administration', 'canCreate'), deleteEmployee);
 
 export default router;
