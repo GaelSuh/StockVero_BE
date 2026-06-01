@@ -494,6 +494,19 @@ export const addCustomerPurchase = async (req: AuthRequest, res: Response) => {
         performedBy: req.user?.id ?? null,
       }).catch(() => {});
 
+      void logAudit({
+        tenantId: req.tenantId!,
+        actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+        actorId: req.user?.id,
+        action: 'CUSTOMER_PURCHASE_ADDED',
+        module: 'contacts',
+        entityType: 'CustomerPurchase',
+        entityId: purchase.id,
+        entityLabel: itemName,
+        details: { quantity, total, customerId: id, inventoryLinked: true, inventoryCategoryId },
+        ...extractRequestContext(req),
+      });
+
       return res.status(201).json({ success: true, message: 'Purchase recorded successfully', data: purchase });
     }
 
@@ -509,6 +522,19 @@ export const addCustomerPurchase = async (req: AuthRequest, res: Response) => {
         notes: notes?.trim() || null,
         purchasedAt: purchasedAt ? new Date(purchasedAt) : new Date(),
       },
+    });
+
+    void logAudit({
+      tenantId: req.tenantId!,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      actorId: req.user?.id,
+      action: 'CUSTOMER_PURCHASE_ADDED',
+      module: 'contacts',
+      entityType: 'CustomerPurchase',
+      entityId: purchase.id,
+      entityLabel: itemName,
+      details: { quantity, total, customerId: id, inventoryLinked: false },
+      ...extractRequestContext(req),
     });
 
     return res.status(201).json({ success: true, message: 'Purchase recorded successfully', data: purchase });
@@ -565,10 +591,36 @@ export const deleteCustomerPurchase = async (req: AuthRequest, res: Response) =>
         performedBy: req.user?.id ?? null,
       }).catch(() => {});
 
+      void logAudit({
+        tenantId: req.tenantId!,
+        actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+        actorId: req.user?.id,
+        action: 'CUSTOMER_PURCHASE_DELETED',
+        module: 'contacts',
+        entityType: 'CustomerPurchase',
+        entityId: purchaseId,
+        entityLabel: purchase.itemName,
+        details: { customerId: id, inventoryLinked: true, inventoryCategoryId: purchase.inventoryCategoryId },
+        ...extractRequestContext(req),
+      });
+
       return res.json({ success: true, message: 'Purchase deleted successfully' });
     }
 
     await (prisma as any).customerPurchase.delete({ where: { id: purchaseId } });
+
+    void logAudit({
+      tenantId: req.tenantId!,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      actorId: req.user?.id,
+      action: 'CUSTOMER_PURCHASE_DELETED',
+      module: 'contacts',
+      entityType: 'CustomerPurchase',
+      entityId: purchaseId,
+      entityLabel: purchase.itemName,
+      details: { customerId: id, inventoryLinked: false },
+      ...extractRequestContext(req),
+    });
 
     return res.json({ success: true, message: 'Purchase deleted successfully' });
   } catch (error) {

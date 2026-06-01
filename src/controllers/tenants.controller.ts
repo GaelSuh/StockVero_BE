@@ -93,7 +93,7 @@ export const updateMyTenant = async (req: AuthRequest, res: Response) => {
 
     void logAudit({
       tenantId: req.tenantId!,
-      actorType: AuditActorType.OWNER,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
       actorId: req.user?.id,
       action: 'COMPANY_UPDATED',
       module: 'settings',
@@ -160,7 +160,7 @@ export const updateMyTenantTheme = async (req: AuthRequest, res: Response) => {
 
     void logAudit({
       tenantId: req.tenantId!,
-      actorType: AuditActorType.OWNER,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
       actorId: req.user?.id,
       action: 'THEME_CHANGED',
       module: 'settings',

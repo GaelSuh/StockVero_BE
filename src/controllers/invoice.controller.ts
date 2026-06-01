@@ -388,6 +388,19 @@ export const sendClientInvoice = async (req: AuthRequest, res: Response) => {
       include: { lineItems: { orderBy: { sortOrder: 'asc' } } },
     });
 
+    void logAudit({
+      tenantId: req.tenantId!,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      actorId: req.user?.id,
+      action: 'INVOICE_SENT',
+      module: 'invoices',
+      entityType: 'Invoice',
+      entityId: invoice.id,
+      entityLabel: invoice.invoiceNumber ?? invoice.id,
+      details: { previousStatus: 'DRAFT', newStatus: 'PENDING' },
+      ...extractRequestContext(req),
+    });
+
     return res.json({
       success: true,
       message: 'Invoice sent successfully',

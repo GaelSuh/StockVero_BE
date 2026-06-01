@@ -13,7 +13,7 @@ export async function tenantGuard(req: AuthRequest, res: Response, next: NextFun
     const decoded = verifyToken(token);
     
     if (!decoded.tenantId || !decoded.userId) {
-      return res.status(401).json({ error: 'Invalid token: missing credentials' });
+      return res.status(401).json({ code: 'INVALID_TOKEN', error: 'Invalid token: missing credentials' });
     }
 
     if (decoded.role === 'SUPER_ADMIN') {
@@ -21,7 +21,7 @@ export async function tenantGuard(req: AuthRequest, res: Response, next: NextFun
     }
 
     if (!decoded.accountType) {
-      return res.status(401).json({ error: 'Invalid token' });
+      return res.status(401).json({ code: 'INVALID_TOKEN', error: 'Invalid token' });
     }
 
     if (decoded.accountType === 'owner') {
@@ -34,7 +34,7 @@ export async function tenantGuard(req: AuthRequest, res: Response, next: NextFun
       });
 
       if (!user || user.tenantId !== decoded.tenantId) {
-        return res.status(401).json({ error: 'Invalid token' });
+        return res.status(401).json({ code: 'INVALID_TOKEN', error: 'Invalid token' });
       }
 
       if (!user.isActive) {
@@ -42,11 +42,11 @@ export async function tenantGuard(req: AuthRequest, res: Response, next: NextFun
       }
 
       if (typeof decoded.tokenVersion !== 'number') {
-        return res.status(401).json({ error: 'Invalid token' });
+        return res.status(401).json({ code: 'INVALID_TOKEN', error: 'Invalid token' });
       }
 
       if (user.tokenVersion !== decoded.tokenVersion) {
-        return res.status(401).json({ error: 'Invalid token' });
+        return res.status(401).json({ code: 'INVALID_TOKEN', error: 'Invalid token' });
       }
     }
 
@@ -60,15 +60,15 @@ export async function tenantGuard(req: AuthRequest, res: Response, next: NextFun
       });
 
       if (!employee || employee.tenantId !== decoded.tenantId) {
-        return res.status(401).json({ error: 'Invalid token' });
+        return res.status(401).json({ code: 'INVALID_TOKEN', error: 'Invalid token' });
       }
 
       if (!employee.isActive) {
         return res.status(403).json({ error: 'Your account has been deactivated.' });
       }
 
-      if (employee.tokenVersion !== decoded.tokenVersion) {
-        return res.status(401).json({ error: 'Invalid token' });
+      if (typeof decoded.tokenVersion !== 'number' || employee.tokenVersion !== decoded.tokenVersion) {
+        return res.status(401).json({ code: 'INVALID_TOKEN', error: 'Invalid token' });
       }
     }
 
@@ -90,9 +90,9 @@ export async function tenantGuard(req: AuthRequest, res: Response, next: NextFun
     next();
   } catch (error) {
     if (error instanceof UnauthorizedError) {
-      return res.status(401).json({ error: error.message });
+      return res.status(401).json({ code: 'INVALID_TOKEN', error: error.message });
     }
-    res.status(401).json({ error: 'Invalid token' });
+    res.status(401).json({ code: 'INVALID_TOKEN', error: 'Invalid token' });
   }
 }
 
