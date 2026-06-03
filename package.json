@@ -15,7 +15,8 @@
     "db:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
-    "create-super-admin": "tsx prisma/scripts/create-super-admin.ts"
+    "create-super-admin": "tsx prisma/scripts/create-super-admin.ts",
+    "backfill:audit-names": "tsx prisma/scripts/backfill-audit-actor-names.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

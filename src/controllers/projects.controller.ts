@@ -1809,6 +1809,19 @@ export const updateMaterial = async (req: AuthRequest, res: Response) => {
       }
     }
 
+    void logAudit({
+      tenantId: req.tenantId!,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      actorId: req.user?.id,
+      action: 'MATERIAL_UPDATED',
+      module: 'projects',
+      entityType: 'ProjectMaterial',
+      entityId: result.updated.id,
+      entityLabel: result.updated.name,
+      details: { projectId: req.params.id },
+      ...extractRequestContext(req),
+    });
+
     return res.json({
       success: true,
       message: 'Material updated successfully',
@@ -2069,6 +2082,18 @@ export const removeMaterialItem = async (req: AuthRequest, res: Response) => {
       }
     }
 
+    void logAudit({
+      tenantId: req.tenantId!,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      actorId: req.user?.id,
+      action: 'MATERIAL_ITEM_REMOVED',
+      module: 'projects',
+      entityType: 'ProductItem',
+      entityId: itemId,
+      details: { projectId, materialId, reason: isFaulty ? 'faulty' : 'returned' },
+      ...extractRequestContext(req),
+    });
+
     return res.json({
       success: true,
       message: 'Item removed from material successfully',
@@ -2183,6 +2208,19 @@ export const createAssignment = async (req: AuthRequest, res: Response) => {
       link: `/projects/${id}`,
     }).catch(() => {});
 
+    void logAudit({
+      tenantId: req.tenantId!,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      actorId: req.user?.id,
+      action: 'EMPLOYEE_ASSIGNED_TO_PROJECT',
+      module: 'projects',
+      entityType: 'ProjectAssignment',
+      entityId: assignment.id,
+      entityLabel: `${employee.firstName} ${employee.lastName}`,
+      details: { projectId: id, projectName: project.name, role: role || 'TECHNICIAN' },
+      ...extractRequestContext(req),
+    });
+
     return res.status(201).json({
       success: true,
       data: {
@@ -2219,6 +2257,18 @@ export const deleteAssignment = async (req: AuthRequest, res: Response) => {
     }
 
     await prisma.projectAssignment.delete({ where: { id: assignmentId } });
+
+    void logAudit({
+      tenantId: req.tenantId!,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      actorId: req.user?.id,
+      action: 'EMPLOYEE_UNASSIGNED_FROM_PROJECT',
+      module: 'projects',
+      entityType: 'ProjectAssignment',
+      entityId: assignmentId,
+      details: { projectId: id },
+      ...extractRequestContext(req),
+    });
 
     return res.json({ success: true, message: 'Assignment removed successfully' });
   } catch (error) {

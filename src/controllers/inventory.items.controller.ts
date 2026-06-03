@@ -952,6 +952,19 @@ export const restockRequest = async (req: AuthRequest, res: Response) => {
       });
     }
 
+    void logAudit({
+      tenantId,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      actorId: req.user?.id,
+      action: 'RESTOCK_REQUESTED',
+      module: 'inventory',
+      entityType: 'InventoryCategory',
+      entityId: category.id,
+      entityLabel: category.name,
+      details: { quantity, effectiveCostPrice },
+      ...extractRequestContext(req),
+    });
+
     return res.status(201).json({
       success: true,
       message: 'Restock request submitted successfully. Awaiting finance approval.',
@@ -1205,6 +1218,18 @@ export const deleteProductItem = async (req: AuthRequest, res: Response) => {
       title: `Unit removed: ${item.systemId}`,
       notes: null,
       performedBy: (req as any).user?.id ?? null,
+    });
+    void logAudit({
+      tenantId,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      actorId: req.user?.id,
+      action: 'PRODUCT_ITEM_DELETED',
+      module: 'inventory',
+      entityType: 'ProductItem',
+      entityId: req.params.id,
+      entityLabel: item.systemId,
+      details: { categoryId: item.categoryId, status: getItemStatus(item, catType) },
+      ...extractRequestContext(req),
     });
     return res.json({ success: true, message: 'Item deleted successfully' });
   } catch (error) {

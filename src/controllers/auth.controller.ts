@@ -584,7 +584,6 @@ export const login = async (req: Request, res: Response) => {
     const { activeModules, permissions } = buildEmployeePermissions(
       employee.role.permissions,
       enabledModules,
-      employee.role.isAdmin
     );
 
     const token = generateToken({
@@ -617,6 +616,10 @@ export const login = async (req: Request, res: Response) => {
     });
 
     const employeeLogoUrl = await resolveSignedUrl(employee.tenant.logoUrl);
+    const empPref = await prisma.userPreference.findUnique({
+      where: { tenantId_userId: { tenantId: employee.tenantId, userId: employee.id } },
+      select: { themeConfig: true },
+    });
     return res.status(200).json({
       success: true,
       message: 'Login successful',
@@ -641,6 +644,7 @@ export const login = async (req: Request, res: Response) => {
           theme: employee.tenant.themeConfig,
           logoUrl: employeeLogoUrl,
         },
+        userTheme: empPref?.themeConfig ?? null,
       },
     });
   } catch (error) {
@@ -754,7 +758,7 @@ export const changePassword = async (req: AuthRequest, res: Response) => {
       }
 
       const passwordHash = await bcrypt.hash(newPassword, 10);
-      await prisma.user.update({ where: { id: user.id }, data: { passwordHash } });
+      await prisma.user.update({ where: { id: user.id }, data: { passwordHash, passwordChangedAt: null } });
 
       // Notify user
       await sendNotification({
@@ -826,6 +830,7 @@ export const changePassword = async (req: AuthRequest, res: Response) => {
         passwordHash,
         mustChangePassword: false,
         tokenVersion: { increment: 1 },
+        passwordChangedAt: null,
       },
     });
 
@@ -853,7 +858,7 @@ export const changePassword = async (req: AuthRequest, res: Response) => {
     const { activeModules, permissions } = buildEmployeePermissions(
       employee.role.permissions,
       enabledModules,
-      employee.role.isAdmin
+      employee.role.isAdmin,
     );
 
     const token = generateToken({
@@ -909,6 +914,10 @@ export const me = async (req: AuthRequest, res: Response) => {
       });
 
       const logoUrl = await resolveSignedUrl(user.tenant.logoUrl);
+      const ownerPref = await prisma.userPreference.findUnique({
+        where: { tenantId_userId: { tenantId: user.tenantId, userId: user.id } },
+        select: { themeConfig: true },
+      });
       return res.status(200).json({
         success: true,
         message: 'User retrieved successfully',
@@ -932,6 +941,7 @@ export const me = async (req: AuthRequest, res: Response) => {
             theme: user.tenant.themeConfig,
             logoUrl,
           },
+          userTheme: ownerPref?.themeConfig ?? null,
         },
       });
     }
@@ -954,7 +964,7 @@ export const me = async (req: AuthRequest, res: Response) => {
     const { activeModules, permissions } = buildEmployeePermissions(
       employee.role.permissions,
       enabledModules,
-      employee.role.isAdmin
+      employee.role.isAdmin,
     );
 
     const token = generateToken({
@@ -971,6 +981,10 @@ export const me = async (req: AuthRequest, res: Response) => {
     });
 
     const employeeLogoUrl = await resolveSignedUrl(employee.tenant.logoUrl);
+    const mePref = await prisma.userPreference.findUnique({
+      where: { tenantId_userId: { tenantId: employee.tenantId, userId: employee.id } },
+      select: { themeConfig: true },
+    });
     return res.status(200).json({
       success: true,
       message: 'User retrieved successfully',
@@ -996,6 +1010,7 @@ export const me = async (req: AuthRequest, res: Response) => {
           theme: employee.tenant.themeConfig,
           logoUrl: employeeLogoUrl,
         },
+        userTheme: mePref?.themeConfig ?? null,
       },
     });
   } catch (error) {
@@ -1021,7 +1036,7 @@ function getDefaultTheme(): Record<string, any> {
   };
 }
 
-function buildEmployeePermissions(rolePermissions: any[], enabledModules: string[], isAdmin: boolean = false) {
+function buildEmployeePermissions(rolePermissions: any[], enabledModules: string[], isAdmin = false) {
   const permissions: Record<string, Permission> = {};
   const activeModules: string[] = [];
 
@@ -1037,10 +1052,13 @@ function buildEmployeePermissions(rolePermissions: any[], enabledModules: string
     activeModules.push(perm.moduleKey);
   }
 
-  // Admin-role employees automatically get full administration access if the tenant has it enabled
-  if (isAdmin && enabledModules.includes(MODULE_KEYS.ADMINISTRATION) && !activeModules.includes(MODULE_KEYS.ADMINISTRATION)) {
-    permissions[MODULE_KEYS.ADMINISTRATION] = { canRead: true, canCreate: true, canUpdate: true, canDelete: true };
-    activeModules.push(MODULE_KEYS.ADMINISTRATION);
+  // Legacy fallback: roles with isAdmin=true that predate the module-based
+  // permission system may have no RolePermission row for 'administration'.
+  // Grant canRead+canCreate automatically so these employees can still access
+  // the Administration pages without requiring a re-login or migration.
+  if (isAdmin && !permissions['administration'] && enabledModules.includes('administration')) {
+    permissions['administration'] = { canRead: true, canCreate: true, canUpdate: false, canDelete: false };
+    activeModules.push('administration');
   }
 
   return { permissions, activeModules };
@@ -1428,7 +1446,7 @@ export const resetPassword = async (req: Request, res: Response) => {
     if (userType === 'OWNER') {
       await prisma.user.update({
         where: { id: userId },
-        data: { passwordHash },
+        data: { passwordHash, passwordChangedAt: null },
       });
     } else {
       await prisma.employee.update({
@@ -1437,6 +1455,7 @@ export const resetPassword = async (req: Request, res: Response) => {
           passwordHash,
           mustChangePassword: false,
           tokenVersion: { increment: 1 },
+          passwordChangedAt: null,
         },
       });
     }

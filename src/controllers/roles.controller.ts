@@ -178,7 +178,7 @@ export const createRole = async (req: AuthRequest, res: Response) => {
 
     void logAudit({
       tenantId: req.tenantId!,
-      actorType: AuditActorType.OWNER,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
       actorId: req.user?.id,
       action: 'ROLE_CREATED',
       module: 'administration',
@@ -296,7 +296,7 @@ export const updateRole = async (req: AuthRequest, res: Response) => {
 
     void logAudit({
       tenantId: req.tenantId!,
-      actorType: AuditActorType.OWNER,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
       actorId: req.user?.id,
       action: 'ROLE_UPDATED',
       module: 'administration',
@@ -355,7 +355,7 @@ export const deleteRole = async (req: AuthRequest, res: Response) => {
 
     void logAudit({
       tenantId: req.tenantId!,
-      actorType: AuditActorType.OWNER,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
       actorId: req.user?.id,
       action: 'ROLE_DELETED',
       module: 'administration',
