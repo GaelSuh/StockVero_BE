@@ -758,7 +758,7 @@ export const changePassword = async (req: AuthRequest, res: Response) => {
       }
 
       const passwordHash = await bcrypt.hash(newPassword, 10);
-      await prisma.user.update({ where: { id: user.id }, data: { passwordHash } });
+      await prisma.user.update({ where: { id: user.id }, data: { passwordHash, passwordChangedAt: null } });
 
       // Notify user
       await sendNotification({
@@ -830,6 +830,7 @@ export const changePassword = async (req: AuthRequest, res: Response) => {
         passwordHash,
         mustChangePassword: false,
         tokenVersion: { increment: 1 },
+        passwordChangedAt: null,
       },
     });
 
@@ -857,6 +858,7 @@ export const changePassword = async (req: AuthRequest, res: Response) => {
     const { activeModules, permissions } = buildEmployeePermissions(
       employee.role.permissions,
       enabledModules,
+      employee.role.isAdmin,
     );
 
     const token = generateToken({
@@ -962,6 +964,7 @@ export const me = async (req: AuthRequest, res: Response) => {
     const { activeModules, permissions } = buildEmployeePermissions(
       employee.role.permissions,
       enabledModules,
+      employee.role.isAdmin,
     );
 
     const token = generateToken({
@@ -1033,7 +1036,7 @@ function getDefaultTheme(): Record<string, any> {
   };
 }
 
-function buildEmployeePermissions(rolePermissions: any[], enabledModules: string[]) {
+function buildEmployeePermissions(rolePermissions: any[], enabledModules: string[], isAdmin = false) {
   const permissions: Record<string, Permission> = {};
   const activeModules: string[] = [];
 
@@ -1047,6 +1050,15 @@ function buildEmployeePermissions(rolePermissions: any[], enabledModules: string
       canDelete: Boolean(perm.canDelete),
     };
     activeModules.push(perm.moduleKey);
+  }
+
+  // Legacy fallback: roles with isAdmin=true that predate the module-based
+  // permission system may have no RolePermission row for 'administration'.
+  // Grant canRead+canCreate automatically so these employees can still access
+  // the Administration pages without requiring a re-login or migration.
+  if (isAdmin && !permissions['administration'] && enabledModules.includes('administration')) {
+    permissions['administration'] = { canRead: true, canCreate: true, canUpdate: false, canDelete: false };
+    activeModules.push('administration');
   }
 
   return { permissions, activeModules };
@@ -1434,7 +1446,7 @@ export const resetPassword = async (req: Request, res: Response) => {
     if (userType === 'OWNER') {
       await prisma.user.update({
         where: { id: userId },
-        data: { passwordHash },
+        data: { passwordHash, passwordChangedAt: null },
       });
     } else {
       await prisma.employee.update({
@@ -1443,6 +1455,7 @@ export const resetPassword = async (req: Request, res: Response) => {
           passwordHash,
           mustChangePassword: false,
           tokenVersion: { increment: 1 },
+          passwordChangedAt: null,
         },
       });
     }

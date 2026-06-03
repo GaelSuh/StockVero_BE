@@ -24,6 +24,7 @@ import {
 import { addDays } from '../lib/dates.js';
 import { getSystemAdminId } from '../services/system-admin.service.js';
 import { logAuditAction } from '../services/audit.service.js';
+import { logAudit, extractRequestContext, AuditActorType } from '../services/auditService.js';
 
 const AddModuleSchema = z.object({
   moduleKey: z.string().min(1),
@@ -315,6 +316,17 @@ export const addBillingModule = async (req: AuthRequest, res: Response) => {
       moduleKey,
     });
 
+    void logAudit({
+      tenantId,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      actorId: req.user?.id,
+      action: 'BILLING_MODULE_ADDED',
+      module: 'billing',
+      entityType: 'SubscriptionModule',
+      entityLabel: moduleKey,
+      ...extractRequestContext(req),
+    });
+
     // Notify authorized users
     await broadcastToModule(tenantId, 'billing', {
       type: 'billing.module.added',
@@ -396,6 +408,18 @@ export const removeBillingModule = async (req: AuthRequest, res: Response) => {
       link: '/billing',
     });
 
+    void logAudit({
+      tenantId,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      actorId: req.user?.id,
+      action: 'BILLING_MODULE_REMOVAL_SCHEDULED',
+      module: 'billing',
+      entityType: 'SubscriptionModule',
+      entityLabel: moduleKey,
+      details: { scheduledRemovalAt: updated.scheduledRemovalAt },
+      ...extractRequestContext(req),
+    });
+
     return res.status(200).json({
       success: true,
       message: 'Module scheduled for removal',
@@ -444,6 +468,17 @@ export const cancelModuleRemoval = async (req: AuthRequest, res: Response) => {
         status: 'ACTIVE',
         scheduledRemovalAt: null,
       },
+    });
+
+    void logAudit({
+      tenantId,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      actorId: req.user?.id,
+      action: 'BILLING_MODULE_REMOVAL_CANCELLED',
+      module: 'billing',
+      entityType: 'SubscriptionModule',
+      entityLabel: moduleKey,
+      ...extractRequestContext(req),
     });
 
     return res.status(200).json({
@@ -546,6 +581,18 @@ export const updatePaymentMethod = async (req: AuthRequest, res: Response) => {
       link: '/billing',
     });
 
+    void logAudit({
+      tenantId,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      actorId: req.user?.id,
+      action: 'PAYMENT_METHOD_UPDATED',
+      module: 'billing',
+      entityType: 'PaymentMethod',
+      entityId: method.id,
+      details: { type: data.type },
+      ...extractRequestContext(req),
+    });
+
     return res.status(200).json({
       success: true,
       message: 'Payment method updated',
@@ -590,6 +637,17 @@ export const requestBillingCycleChange = async (req: AuthRequest, res: Response)
     await prisma.subscription.update({
       where: { tenantId },
       data: { pendingCycleChange: parsed.data.billingCycle },
+    });
+
+    void logAudit({
+      tenantId,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      actorId: req.user?.id,
+      action: 'BILLING_CYCLE_CHANGE_REQUESTED',
+      module: 'billing',
+      entityType: 'Subscription',
+      details: { billingCycle: parsed.data.billingCycle },
+      ...extractRequestContext(req),
     });
 
     return res.status(200).json({
@@ -698,6 +756,17 @@ export const cancelSubscription = async (req: AuthRequest, res: Response) => {
     const systemAdminId = await getSystemAdminId();
     await logAuditAction(systemAdminId, tenantId, 'SUBSCRIPTION_CANCELLED', {
       reason: updated.cancellationReason,
+    });
+
+    void logAudit({
+      tenantId,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      actorId: req.user?.id,
+      action: 'SUBSCRIPTION_CANCELLED',
+      module: 'billing',
+      entityType: 'Subscription',
+      details: { reason: updated.cancellationReason },
+      ...extractRequestContext(req),
     });
 
     const tenant = await prisma.tenant.findUnique({

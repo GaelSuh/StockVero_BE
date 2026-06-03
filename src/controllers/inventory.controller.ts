@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { prisma } from '../db.js';
 import { AuthRequest } from '../types/index.js';
 import { broadcastToModule, sendNotification } from '../services/notificationService.js';
+import { logAudit, extractRequestContext, AuditActorType } from '../services/auditService.js';
 
 const ItemSchema = z.object({
   sku: z.string().min(1),
@@ -73,6 +74,19 @@ export const createItem = async (req: AuthRequest, res: Response) => {
       title: 'New Inventory Item',
       message: `${item.name} (${item.sku}) has been added to stock.`,
       link: `/inventory/${item.id}`,
+    });
+
+    void logAudit({
+      tenantId: req.tenantId!,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      actorId: req.user?.id,
+      action: 'INVENTORY_ITEM_CREATED',
+      module: 'inventory',
+      entityType: 'InventoryItem',
+      entityId: item.id,
+      entityLabel: item.name,
+      details: { sku: item.sku, quantity: item.quantity, unitCost: Number(item.unitCost) },
+      ...extractRequestContext(req),
     });
 
     return res.status(201).json({
@@ -219,6 +233,18 @@ export const updateItem = async (req: AuthRequest, res: Response) => {
       link: `/inventory/${item.id}`,
     });
 
+    void logAudit({
+      tenantId: req.tenantId!,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      actorId: req.user?.id,
+      action: 'INVENTORY_ITEM_UPDATED',
+      module: 'inventory',
+      entityType: 'InventoryItem',
+      entityId: item.id,
+      entityLabel: item.name,
+      ...extractRequestContext(req),
+    });
+
     return res.json({
       success: true,
       message: 'Inventory item updated successfully',
@@ -271,6 +297,19 @@ export const deleteItem = async (req: AuthRequest, res: Response) => {
       type: 'inventory.deleted',
       title: 'Inventory Item Removed',
       message: `${item.name} has been deleted from inventory.`,
+    });
+
+    void logAudit({
+      tenantId: req.tenantId!,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      actorId: req.user?.id,
+      action: 'INVENTORY_ITEM_DELETED',
+      module: 'inventory',
+      entityType: 'InventoryItem',
+      entityId: req.params.id,
+      entityLabel: item.name,
+      details: { sku: item.sku },
+      ...extractRequestContext(req),
     });
 
     return res.json({
@@ -348,6 +387,19 @@ export const createMovement = async (req: AuthRequest, res: Response) => {
         item.lowStockAt,
       ).catch(() => {});
     }
+
+    void logAudit({
+      tenantId: req.tenantId!,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      actorId: req.user?.id,
+      action: 'STOCK_MOVEMENT_CREATED',
+      module: 'inventory',
+      entityType: 'InventoryMovement',
+      entityId: movement.id,
+      entityLabel: item.name,
+      details: { direction: data.direction, quantity: data.quantity, note: data.note },
+      ...extractRequestContext(req),
+    });
 
     return res.status(201).json({
       success: true,

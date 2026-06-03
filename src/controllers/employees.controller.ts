@@ -298,7 +298,7 @@ export const createEmployee = async (req: AuthRequest, res: Response) => {
 
     void logAudit({
       tenantId: req.tenantId!,
-      actorType: AuditActorType.OWNER,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
       actorId: req.user?.id,
       action: 'EMPLOYEE_CREATED',
       module: 'administration',
@@ -591,7 +591,7 @@ export const updateEmployeeStatus = async (req: AuthRequest, res: Response) => {
 
     void logAudit({
       tenantId: req.tenantId!,
-      actorType: AuditActorType.OWNER,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
       actorId: req.user?.id,
       action: updatedEmployee.isActive ? 'EMPLOYEE_REACTIVATED' : 'EMPLOYEE_DEACTIVATED',
       module: 'administration',
@@ -672,7 +672,7 @@ export const resetEmployeePassword = async (req: AuthRequest, res: Response) => 
 
     void logAudit({
       tenantId: req.tenantId!,
-      actorType: AuditActorType.OWNER,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
       actorId: req.user?.id,
       action: 'EMPLOYEE_PASSWORD_RESET',
       module: 'administration',
@@ -727,7 +727,7 @@ export const deleteEmployee = async (req: AuthRequest, res: Response) => {
 
     void logAudit({
       tenantId: req.tenantId!,
-      actorType: AuditActorType.OWNER,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
       actorId: req.user?.id,
       action: 'EMPLOYEE_DEACTIVATED',
       module: 'administration',
