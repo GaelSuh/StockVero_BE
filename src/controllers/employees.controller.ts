@@ -264,7 +264,7 @@ export const createEmployee = async (req: AuthRequest, res: Response) => {
       type: 'administration.employee.created',
       title: 'New Employee Added',
       message: `${employee.firstName} ${employee.lastName} has been added to the team.`,
-      link: `/administration/employees/${employee.id}`,
+      link: `/admin/employees/${employee.id}`,
     });
 
     // Welcome notification to the user
@@ -429,7 +429,7 @@ export const updateEmployee = async (req: AuthRequest, res: Response) => {
       type: 'administration.employee.updated',
       title: 'Employee Profile Updated',
       message: `The profile of ${updatedEmployee.firstName} ${updatedEmployee.lastName} has been updated.`,
-      link: `/administration/employees/${updatedEmployee.id}`,
+      link: `/admin/employees/${updatedEmployee.id}`,
     });
 
     void logAudit({
@@ -516,7 +516,7 @@ export const updateEmployeeRole = async (req: AuthRequest, res: Response) => {
       type: 'administration.employee.role_updated',
       title: 'Employee Role Changed',
       message: `${updatedEmployee.firstName}'s role has been updated to ${role.name}.`,
-      link: `/administration/employees/${updatedEmployee.id}`,
+      link: `/admin/employees/${updatedEmployee.id}`,
     });
 
     return res.json({
@@ -586,7 +586,7 @@ export const updateEmployeeStatus = async (req: AuthRequest, res: Response) => {
       type: 'administration.employee.status_updated',
       title: 'Employee Status Changed',
       message: `${updatedEmployee.firstName}'s account has been ${updatedEmployee.isActive ? 'activated' : 'deactivated'}.`,
-      link: `/administration/employees/${updatedEmployee.id}`,
+      link: `/admin/employees/${updatedEmployee.id}`,
     });
 
     void logAudit({
@@ -722,7 +722,7 @@ export const deleteEmployee = async (req: AuthRequest, res: Response) => {
       type: 'administration.employee.deleted',
       title: 'Employee Deactivated',
       message: `${employee.firstName} ${employee.lastName}'s account has been deactivated.`,
-      link: '/administration/employees',
+      link: `/admin/employees/${updatedEmployee.id}`,
     });
 
     void logAudit({
