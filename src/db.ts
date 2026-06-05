@@ -15,11 +15,54 @@ const pool = new Pool({
 });
 const adapter = new PrismaPg(pool);
 
-export const prisma = new PrismaClient({
+const SOFT_DELETE_MODELS = new Set([
+  'InventoryCategory', 'ProductItem', 'InventoryItem', 'Project',
+  'ProjectMilestone', 'ProjectMaterial', 'Customer', 'Transaction',
+  'Invoice', 'Employee', 'Role', 'Document',
+]);
+
+const baseClient = new PrismaClient({
   adapter,
   log: process.env.NODE_ENV === 'development'
     ? ['query', 'error', 'warn']
     : ['error'],
 });
+
+// ── Soft-delete extension (Prisma 5+) ─────────────────────────────────────
+// Automatically excludes soft-deleted records from every findUnique,
+// findFirst, findMany, and count query — no changes needed in controllers.
+export const prisma = baseClient.$extends({
+  query: {
+    $allModels: {
+      async findUnique({ model, args, query }) {
+        if (SOFT_DELETE_MODELS.has(model)) {
+          (args as any).where = { ...(args as any).where, isDeleted: false };
+        }
+        return query(args);
+      },
+      async findFirst({ model, args, query }) {
+        if (SOFT_DELETE_MODELS.has(model)) {
+          (args as any).where = { ...(args as any).where, isDeleted: false };
+        }
+        return query(args);
+      },
+      async findMany({ model, args, query }) {
+        if (SOFT_DELETE_MODELS.has(model)) {
+          (args as any).where = { ...(args as any).where, isDeleted: false };
+        }
+        return query(args);
+      },
+      async count({ model, args, query }) {
+        if (SOFT_DELETE_MODELS.has(model)) {
+          (args as any).where = { ...(args as any).where, isDeleted: false };
+        }
+        return query(args);
+      },
+    },
+  },
+});
+
+// Unextended client — use only when you need to query soft-deleted records
+export const prismaBase = baseClient;
 
 export { pool };

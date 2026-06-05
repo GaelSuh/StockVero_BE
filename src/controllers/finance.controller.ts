@@ -5,6 +5,7 @@ import { AuthRequest } from '../types/index.js';
 import { broadcastToModule } from '../services/notificationService.js';
 import { recordIncome, recordExpense, reverseIncome, reverseExpense } from '../services/balanceService.js';
 import { logAudit, extractRequestContext, buildDiff, AuditActorType } from '../services/auditService.js';
+import { softDelete, isSoftDeleted } from '../services/softDeleteService.js';
 
 const TransactionSchema = z.object({
   type: z.enum(['INCOME', 'EXPENSE']),
@@ -317,31 +318,40 @@ export const updateTransaction = async (req: AuthRequest, res: Response) => {
 export const deleteTransaction = async (req: AuthRequest, res: Response) => {
   try {
     const existing = await prisma.transaction.findFirst({ where: { id: req.params.id, tenantId: req.tenantId! } });
-    if (!existing) return res.status(404).json({ success: false, message: 'Transaction not found' });
-    if (existing.isAutomatic) return res.status(400).json({ success: false, message: 'Cannot delete automatic transactions' });
-    await prisma.$transaction(async (tx) => {
-      if (existing.status === 'ACCEPTED') {
+    if (!existing) {
+      if (await isSoftDeleted('transaction', req.params.id)) {
+        return res.status(410).json({ success: false, error: { code: 'RECORD_DELETED', message: 'This record has been deleted and is no longer available.' } });
+      }
+      return res.status(404).json({ success: false, message: 'Transaction not found' });
+    }
+    if (existing.isAutomatic) return res.status(400).json({ success: false, message: 'Automatic transactions cannot be deleted.' });
+
+    // Reverse balance impact if the transaction was accepted
+    if (existing.status === 'ACCEPTED') {
+      await prisma.$transaction(async (tx) => {
         if (existing.type === 'INCOME') {
           await reverseIncome(req.tenantId!, Number(existing.amount), tx);
         } else {
           await reverseExpense(req.tenantId!, Number(existing.amount), tx);
         }
-      }
-      await tx.transaction.delete({ where: { id: req.params.id } });
-    });
-    await broadcastToModule(req.tenantId!, 'finance', { type: 'finance.transaction.deleted', title: 'Transaction Deleted', message: `The manual transaction for ${existing.description} was removed.` });
-    void logAudit({
+      });
+    }
+
+    await softDelete({
+      model: 'transaction',
+      id: existing.id,
       tenantId: req.tenantId!,
-      actorType: req.user?.accountType === 'owner' ? AuditActorType.OWNER : AuditActorType.EMPLOYEE,
       actorId: req.user?.id,
+      actorType: req.user?.accountType === 'owner' ? AuditActorType.OWNER : AuditActorType.EMPLOYEE,
       action: 'TRANSACTION_DELETED',
-      module: 'finance',
       entityType: 'Transaction',
-      entityId: existing.id,
-      entityLabel: existing.description ?? undefined,
+      entityLabel: existing.description ?? 'Transaction',
+      module: 'finance',
       details: { type: existing.type, amount: existing.amount, status: existing.status },
       ...extractRequestContext(req),
     });
+
+    await broadcastToModule(req.tenantId!, 'finance', { type: 'finance.transaction.deleted', title: 'Transaction Deleted', message: `The manual transaction for ${existing.description} was removed.` });
     return res.json({ success: true, message: 'Transaction deleted successfully' });
   } catch (error) {
     console.error('Error deleting transaction:', error);

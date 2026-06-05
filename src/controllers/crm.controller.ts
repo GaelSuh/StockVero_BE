@@ -5,6 +5,7 @@ import { AuthRequest } from '../types/index.js';
 import { broadcastToModule } from '../services/notificationService.js';
 import { createPaymentInvoice } from '../services/invoiceService.js';
 import { logAudit, extractRequestContext, buildDiff, AuditActorType } from '../services/auditService.js';
+import { softDelete, isSoftDeleted } from '../services/softDeleteService.js';
 import { recordStockEvent } from './inventory.items.controller.js';
 
 const CustomerSchema = z.object({
@@ -328,47 +329,47 @@ export const deleteCustomer = async (req: AuthRequest, res: Response) => {
       where: { id: req.params.id, tenantId: req.tenantId! },
     });
     if (!customer) {
-      return res.status(404).json({
-        success: false,
-        message: 'Customer not found',
-      });
+      if (await isSoftDeleted('customer', req.params.id)) {
+        return res.status(410).json({ success: false, error: { code: 'RECORD_DELETED', message: 'This record has been deleted and is no longer available.' } });
+      }
+      return res.status(404).json({ success: false, message: 'Customer not found' });
     }
 
-    const projectCount = await prisma.project.count({
-      where: { customerId: req.params.id, tenantId: req.tenantId! },
+    const activeProjectCount = await prisma.project.count({
+      where: {
+        customerId: req.params.id,
+        tenantId: req.tenantId!,
+        status: { notIn: ['COMPLETED', 'CANCELLED'] },
+      },
     });
-    if (projectCount > 0) {
+    if (activeProjectCount > 0) {
       return res.status(400).json({
         success: false,
-        message: 'Cannot delete customer with active projects',
+        message: 'Cannot delete a customer with active projects. Complete or cancel their projects first.',
       });
     }
 
-    await prisma.customer.delete({ where: { id: req.params.id } });
-
-    // Notify authorized users
+    // Notify before soft-deleting
     await broadcastToModule(req.tenantId!, 'contacts', {
       type: 'customer.deleted',
       title: 'Customer Deleted',
       message: `${customer.name} has been removed from the system.`,
     });
 
-    void logAudit({
+    await softDelete({
+      model: 'customer',
+      id: customer.id,
       tenantId: req.tenantId!,
-      actorType: req.user?.accountType === 'owner' ? AuditActorType.OWNER : AuditActorType.EMPLOYEE,
       actorId: req.user?.id,
+      actorType: req.user?.accountType === 'owner' ? AuditActorType.OWNER : AuditActorType.EMPLOYEE,
       action: 'CUSTOMER_DELETED',
-      module: 'contacts',
       entityType: 'Customer',
-      entityId: customer.id,
       entityLabel: customer.name,
+      module: 'contacts',
       ...extractRequestContext(req),
     });
 
-    return res.json({
-      success: true,
-      message: 'Customer deleted successfully',
-    });
+    return res.json({ success: true, message: 'Customer deleted successfully' });
   } catch (error) {
     console.error('Error deleting customer:', error);
     return res.status(500).json({

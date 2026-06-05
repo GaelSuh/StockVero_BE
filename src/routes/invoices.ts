@@ -10,6 +10,7 @@ import {
   sendClientInvoice,
   getInvoicePdfData,
   approveProjectInstalment,
+  deleteInvoice,
 } from '../controllers/invoice.controller.js';
 
 const router = Router();
@@ -33,5 +34,8 @@ router.patch('/:id/approve-instalment', permissionGuard('finance', 'canUpdate'),
 
 // Send client invoice (DRAFT → PENDING)
 router.patch('/:id/send', permissionGuard('finance', 'canUpdate'), sendClientInvoice);
+
+// Delete invoice (PENDING / DRAFT / REJECTED only)
+router.delete('/:id', permissionGuard('finance', 'canDelete'), deleteInvoice);
 
 export default router;

@@ -4,6 +4,7 @@ import { tenantGuard } from '../middleware/auth.js';
 import { prisma } from '../db.js';
 import { AuthRequest } from '../types/index.js';
 import { logAudit, extractRequestContext, AuditActorType } from '../services/auditService.js';
+import { softDelete, isSoftDeleted } from '../services/softDeleteService.js';
 import { supabase, STORAGE_BUCKET } from '../lib/storage.js';
 
 const router = Router();
@@ -209,25 +210,30 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
   const tenantId = req.tenantId!;
 
   const doc = await prisma.document.findUnique({ where: { id: req.params.id } });
-  if (!doc) return res.status(404).json({ success: false, message: 'Document not found.' });
+  if (!doc) {
+    if (await isSoftDeleted('document', req.params.id)) {
+      return res.status(410).json({ success: false, error: { code: 'RECORD_DELETED', message: 'This record has been deleted and is no longer available.' } });
+    }
+    return res.status(404).json({ success: false, message: 'Document not found.' });
+  }
   if (doc.tenantId !== tenantId) return res.status(403).json({ success: false, message: 'Access denied.' });
 
+  // Delete the file from storage first, then soft-delete the DB record
   if (supabase) {
     const { error } = await supabase.storage.from(STORAGE_BUCKET).remove([doc.storagePath]);
     if (error) console.error('Storage delete error (continuing):', error);
   }
 
-  await prisma.document.delete({ where: { id: doc.id } });
-
-  void logAudit({
+  await softDelete({
+    model: 'document',
+    id: doc.id,
     tenantId,
-    actorType: req.user?.accountType === 'owner' ? AuditActorType.OWNER : AuditActorType.EMPLOYEE,
     actorId: req.user?.id,
+    actorType: req.user?.accountType === 'owner' ? AuditActorType.OWNER : AuditActorType.EMPLOYEE,
     action: 'DOCUMENT_DELETED',
-    module: doc.sourceModule,
     entityType: 'Document',
-    entityId: doc.id,
     entityLabel: doc.name,
+    module: doc.sourceModule,
     details: { sourceModule: doc.sourceModule, sourceId: doc.sourceId },
     ...extractRequestContext(req),
   });

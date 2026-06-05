@@ -12,6 +12,7 @@ import {
   rejectProjectInvoice,
 } from '../services/invoicePaymentService.js';
 import { logAudit, extractRequestContext, AuditActorType } from '../services/auditService.js';
+import { softDelete, isSoftDeleted } from '../services/softDeleteService.js';
 
 // ── listInvoices ──────────────────────────────────────────────────────────────
 
@@ -501,5 +502,44 @@ export const getInvoicePdfData = async (req: AuthRequest, res: Response) => {
       message: 'Failed to retrieve invoice PDF data',
       error: error instanceof Error ? error.message : 'Unknown error',
     });
+  }
+};
+
+export const deleteInvoice = async (req: AuthRequest, res: Response) => {
+  try {
+    const invoice = await (prisma as any).invoice.findFirst({
+      where: { id: req.params.id, tenantId: req.tenantId! },
+    });
+    if (!invoice) {
+      if (await isSoftDeleted('invoice', req.params.id)) {
+        return res.status(410).json({ success: false, error: { code: 'RECORD_DELETED', message: 'This record has been deleted and is no longer available.' } });
+      }
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+    if (invoice.status === 'APPROVED' || invoice.status === 'PAID') {
+      return res.status(400).json({
+        success: false,
+        message: 'Approved invoices cannot be deleted as they affect the financial record.',
+      });
+    }
+
+    await softDelete({
+      model: 'invoice',
+      id: invoice.id,
+      tenantId: req.tenantId!,
+      actorId: req.user?.id,
+      actorType: req.user?.accountType === 'owner' ? AuditActorType.OWNER : AuditActorType.EMPLOYEE,
+      action: 'INVOICE_DELETED',
+      entityType: 'Invoice',
+      entityLabel: invoice.invoiceNumber,
+      module: 'finance',
+      details: { status: invoice.status, type: invoice.type, total: invoice.total },
+      ...extractRequestContext(req),
+    });
+
+    return res.json({ success: true, message: 'Invoice deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting invoice:', error);
+    return res.status(500).json({ success: false, message: 'Failed to delete invoice', error: error instanceof Error ? error.message : 'Unknown error' });
   }
 };

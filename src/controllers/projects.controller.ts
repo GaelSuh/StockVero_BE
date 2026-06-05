@@ -8,6 +8,7 @@ import { sendNotification, broadcastToModule } from '../services/notificationSer
 import { getProjectAccessRecipients } from '../utils/projectRecipients.js';
 import { checkSufficientFunds, recordExpense, reverseExpense } from '../services/balanceService.js';
 import { logAudit, extractRequestContext, buildDiff, AuditActorType } from '../services/auditService.js';
+import { softDelete, isSoftDeleted } from '../services/softDeleteService.js';
 
 async function getExistingPendingEntry(
   tenantId: string,
@@ -941,37 +942,44 @@ export const deleteProject = async (req: AuthRequest, res: Response) => {
       where: { id: req.params.id, tenantId: req.tenantId! },
     });
     if (!project) {
-      return res.status(404).json({
-        success: false,
-        message: 'Project not found',
-      });
+      if (await isSoftDeleted('project', req.params.id)) {
+        return res.status(410).json({ success: false, error: { code: 'RECORD_DELETED', message: 'This record has been deleted and is no longer available.' } });
+      }
+      return res.status(404).json({ success: false, message: 'Project not found' });
     }
-    if (project.isLocked) {
-      return res.status(403).json({
+    if (project.status === 'IN_PROGRESS') {
+      return res.status(400).json({
         success: false,
-        message: 'This project is locked. No further changes can be made to phases or materials.',
+        message: 'Cannot delete an active project. Change the status to Cancelled first.',
       });
     }
 
-    await prisma.project.delete({ where: { id: req.params.id } });
+    // Cascade soft-delete phases and materials
+    const now = new Date();
+    await prisma.projectMilestone.updateMany({
+      where: { projectId: project.id, tenantId: req.tenantId! },
+      data: { isDeleted: true, deletedAt: now },
+    });
+    await prisma.projectMaterial.updateMany({
+      where: { projectId: project.id, tenantId: req.tenantId! },
+      data: { isDeleted: true, deletedAt: now },
+    });
 
-    void logAudit({
+    await softDelete({
+      model: 'project',
+      id: project.id,
       tenantId: req.tenantId!,
-      actorType: req.user?.accountType === 'owner' ? AuditActorType.OWNER : AuditActorType.EMPLOYEE,
       actorId: req.user?.id,
+      actorType: req.user?.accountType === 'owner' ? AuditActorType.OWNER : AuditActorType.EMPLOYEE,
       action: 'PROJECT_DELETED',
-      module: 'projects',
       entityType: 'Project',
-      entityId: project.id,
       entityLabel: project.name,
+      module: 'projects',
       details: { name: project.name },
       ...extractRequestContext(req),
     });
 
-    return res.json({
-      success: true,
-      message: 'Project deleted successfully',
-    });
+    return res.json({ success: true, message: 'Project deleted successfully' });
   } catch (error) {
     console.error('Error deleting project:', error);
     return res.status(500).json({

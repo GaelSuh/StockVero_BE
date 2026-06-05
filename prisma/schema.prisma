@@ -135,6 +135,8 @@ model Role {
   /// This field will be removed in a future migration once all checks have
   /// been migrated to the module-based permission system.
   isAdmin      Boolean          @default(false) @map("is_admin")
+  isDeleted    Boolean          @default(false) @map("is_deleted")
+  deletedAt    DateTime?        @map("deleted_at")
   createdAt    DateTime         @default(now()) @map("created_at")
   updatedAt    DateTime         @updatedAt @map("updated_at")
   employees    Employee[]
@@ -179,6 +181,8 @@ model Employee {
   lastLoginAt             DateTime?           @map("last_login_at")
   passwordChangedAt       DateTime?           @map("password_changed_at")
   notificationPreferences Json?               @map("notification_preferences")
+  isDeleted               Boolean             @default(false) @map("is_deleted")
+  deletedAt               DateTime?           @map("deleted_at")
   createdAt               DateTime            @default(now()) @map("created_at")
   updatedAt               DateTime            @updatedAt @map("updated_at")
   role                    Role                @relation(fields: [roleId], references: [id])
@@ -319,6 +323,8 @@ model InventoryItem {
   lowStockAt       Int                 @default(5) @map("low_stock_at")
   status           InventoryStatus     @default(IN_STOCK)
   deprecated       Boolean             @default(false)
+  isDeleted        Boolean             @default(false) @map("is_deleted")
+  deletedAt        DateTime?           @map("deleted_at")
   createdAt        DateTime            @default(now()) @map("created_at")
   updatedAt        DateTime            @updatedAt @map("updated_at")
   tenant           Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -353,6 +359,8 @@ model InventoryCategory {
   imageUrl          String?            @map("image_url")
   images            Json               @default("[]") @map("images")
   notes             String?
+  isDeleted         Boolean            @default(false) @map("is_deleted")
+  deletedAt         DateTime?          @map("deleted_at")
   createdAt         DateTime           @default(now()) @map("created_at")
   updatedAt         DateTime           @updatedAt @map("updated_at")
   stockLogs         CategoryStockLog[]
@@ -380,6 +388,8 @@ model ProductItem {
   projectId         String?                     @map("project_id")
   projectMaterialId String?                     @map("project_material_id")
   addedAfterInvoice Boolean                     @default(false) @map("added_after_invoice")
+  isDeleted         Boolean                     @default(false) @map("is_deleted")
+  deletedAt         DateTime?                   @map("deleted_at")
   createdAt         DateTime                    @default(now()) @map("created_at")
   updatedAt         DateTime                    @updatedAt @map("updated_at")
   maintenanceLogs   ProductItemMaintenanceLog[]
@@ -482,6 +492,8 @@ model Customer {
   initialRevenue Decimal?           @map("initial_revenue") @db.Decimal(15, 2)
   status         CustomerStatus     @default(ACTIVE)
   notes          String?
+  isDeleted      Boolean            @default(false) @map("is_deleted")
+  deletedAt      DateTime?          @map("deleted_at")
   createdAt      DateTime           @default(now()) @map("created_at")
   updatedAt      DateTime           @updatedAt @map("updated_at")
   contacts       CustomerContact[]
@@ -550,6 +562,8 @@ model Project {
   dueDate         DateTime?           @map("due_date")
   completedAt     DateTime?           @map("completed_at")
   isLocked        Boolean             @default(false) @map("is_locked")
+  isDeleted       Boolean             @default(false) @map("is_deleted")
+  deletedAt       DateTime?           @map("deleted_at")
   createdAt       DateTime            @default(now()) @map("created_at")
   updatedAt       DateTime            @updatedAt @map("updated_at")
   availableBudget Decimal             @default(0) @map("available_budget") @db.Decimal(15, 2)
@@ -582,6 +596,8 @@ model ProjectMilestone {
   endDate     DateTime?       @map("end_date")
   notes       String?
   sortOrder   Int             @default(0) @map("sort_order")
+  isDeleted   Boolean         @default(false) @map("is_deleted")
+  deletedAt   DateTime?       @map("deleted_at")
   createdAt   DateTime        @default(now()) @map("created_at")
   updatedAt   DateTime        @updatedAt @map("updated_at")
   project     Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -612,6 +628,8 @@ model ProjectMaterial {
   updatedAt            DateTime           @updatedAt @map("updated_at")
   returnNote           String?            @map("return_note")
   returnedAt           DateTime?          @map("returned_at")
+  isDeleted            Boolean            @default(false) @map("is_deleted")
+  deletedAt            DateTime?          @map("deleted_at")
   category             InventoryCategory? @relation("CategoryProjectMaterials", fields: [categoryId], references: [id])
   product              InventoryItem?     @relation(fields: [productId], references: [id])
   project              Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -662,6 +680,8 @@ model Transaction {
   customerId     String?           @map("customer_id")
   notes          String?
   projectId      String?           @map("project_id")
+  isDeleted      Boolean           @default(false) @map("is_deleted")
+  deletedAt      DateTime?         @map("deleted_at")
   invoicePayment InvoicePayment?
   project        Project?          @relation(fields: [projectId], references: [id])
   tenant         Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -705,6 +725,8 @@ model Invoice {
   isFullyPaid     Boolean            @default(false) @map("is_fully_paid")
   remainingAmount Decimal            @default(0) @map("remaining_amount") @db.Decimal(15, 2)
   totalApproved   Decimal            @default(0) @map("total_approved") @db.Decimal(15, 2)
+  isDeleted       Boolean            @default(false) @map("is_deleted")
+  deletedAt       DateTime?          @map("deleted_at")
   lineItems       InvoiceLineItem[]
   payments        InvoicePayment[]
   category        InventoryCategory? @relation(fields: [categoryId], references: [id])
@@ -820,6 +842,8 @@ model Document {
   fileSize     Int?           @map("file_size")
   mimeType     String?        @map("mime_type")
   uploadedBy   String         @map("uploaded_by")
+  isDeleted    Boolean        @default(false) @map("is_deleted")
+  deletedAt    DateTime?      @map("deleted_at")
   createdAt    DateTime       @default(now()) @map("created_at")
   updatedAt    DateTime       @updatedAt @map("updated_at")
   tenant       Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)

@@ -7,6 +7,7 @@ import { createPurchaseInvoice, deductUnitCost } from '../services/invoiceServic
 import { generateSystemId } from '../utils/generateSystemId.js';
 import { deleteStorageFiles } from '../lib/storage.js';
 import { logAudit, extractRequestContext, buildDiff, AuditActorType } from '../services/auditService.js';
+import { softDelete, isSoftDeleted } from '../services/softDeleteService.js';
 
 // ── Shared helpers ─────────────────────────────────────────────────────────────
 
@@ -617,30 +618,33 @@ export const deleteCategory = async (req: AuthRequest, res: Response) => {
     const tenantId = req.tenantId!;
     const category = await fetchCategoryById(tenantId, String(req.params.id));
     if (!category) {
+      if (await isSoftDeleted('inventoryCategory', String(req.params.id))) {
+        return res.status(410).json({ success: false, error: { code: 'RECORD_DELETED', message: 'This record has been deleted and is no longer available.' } });
+      }
       return res.status(404).json({ success: false, message: 'Category not found' });
     }
 
-    const productItemCount = await (prisma as any).productItem.count({
-      where: { tenantId, categoryId: req.params.id },
+    // Block if any active (non-deleted) project materials reference items from this category
+    const activeMaterialCount = await (prisma as any).projectMaterial.count({
+      where: { tenantId, categoryId: req.params.id, isDeleted: false },
     });
-    if (productItemCount > 0) {
+    if (activeMaterialCount > 0) {
       return res.status(400).json({
         success: false,
-        message: 'Category has serialised items and cannot be deleted. Remove all items first.',
+        message: 'Cannot delete this product — it is currently assigned to active projects. Remove the materials from those projects first.',
       });
     }
 
-    await (prisma as any).inventoryCategory.delete({ where: { id: req.params.id } });
-
-    void logAudit({
+    await softDelete({
+      model: 'inventoryCategory',
+      id: category.id,
       tenantId,
-      actorType: req.user?.accountType === 'owner' ? AuditActorType.OWNER : AuditActorType.EMPLOYEE,
       actorId: req.user?.id,
+      actorType: req.user?.accountType === 'owner' ? AuditActorType.OWNER : AuditActorType.EMPLOYEE,
       action: 'PRODUCT_DELETED',
-      module: 'inventory',
       entityType: 'InventoryCategory',
-      entityId: category.id,
       entityLabel: category.name,
+      module: 'inventory',
       ...extractRequestContext(req),
     });
 
@@ -1186,6 +1190,9 @@ export const deleteProductItem = async (req: AuthRequest, res: Response) => {
       include: { category: { select: { type: true } } },
     });
     if (!item) {
+      if (await isSoftDeleted('productItem', String(req.params.id))) {
+        return res.status(410).json({ success: false, error: { code: 'RECORD_DELETED', message: 'This record has been deleted and is no longer available.' } });
+      }
       return res.status(404).json({ success: false, message: 'Item not found' });
     }
     const catType: string = item.category?.type ?? 'STOCK';
@@ -1194,7 +1201,7 @@ export const deleteProductItem = async (req: AuthRequest, res: Response) => {
     if (currentStatus === deployedStatus) {
       return res.status(400).json({
         success: false,
-        message: 'Cannot delete a deployed item. Remove it from the project first.',
+        message: 'Cannot delete a unit that is currently deployed on a project.',
       });
     }
     if (currentStatus === 'UNDER_MAINTENANCE' || currentStatus === 'FAULTY') {
@@ -1203,8 +1210,20 @@ export const deleteProductItem = async (req: AuthRequest, res: Response) => {
         message: 'Cannot delete an item with active maintenance record.',
       });
     }
-    await (prisma as any).productItemMaintenanceLog.deleteMany({ where: { productItemId: req.params.id } });
-    await (prisma as any).productItem.delete({ where: { id: req.params.id } });
+
+    await softDelete({
+      model: 'productItem',
+      id: item.id,
+      tenantId,
+      actorId: req.user?.id,
+      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+      action: 'PRODUCT_ITEM_DELETED',
+      entityType: 'ProductItem',
+      entityLabel: item.systemId,
+      module: 'inventory',
+      details: { categoryId: item.categoryId, status: currentStatus },
+      ...extractRequestContext(req),
+    });
 
     // Record stock event for removed unit (if it was available, count drops)
     const delta = isAvailableStatus(currentStatus ?? '') ? -1 : 0;
@@ -1218,18 +1237,6 @@ export const deleteProductItem = async (req: AuthRequest, res: Response) => {
       title: `Unit removed: ${item.systemId}`,
       notes: null,
       performedBy: (req as any).user?.id ?? null,
-    });
-    void logAudit({
-      tenantId,
-      actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
-      actorId: req.user?.id,
-      action: 'PRODUCT_ITEM_DELETED',
-      module: 'inventory',
-      entityType: 'ProductItem',
-      entityId: req.params.id,
-      entityLabel: item.systemId,
-      details: { categoryId: item.categoryId, status: getItemStatus(item, catType) },
-      ...extractRequestContext(req),
     });
     return res.json({ success: true, message: 'Item deleted successfully' });
   } catch (error) {
