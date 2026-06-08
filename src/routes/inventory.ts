@@ -1,9 +1,11 @@
-import { Router } from 'express';
+import { Router, Response } from 'express';
 import crypto from 'crypto';
 import { z } from 'zod';
 import { createClient } from '@supabase/supabase-js';
 import { tenantGuard, moduleGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
 import { prisma } from '../db.js';
+import { AuthRequest } from '../types/index.js';
+import { checkInventoryCategoryDependencies, checkProductItemDependencies } from '../services/dependencyCheckService.js';
 import { broadcastToModule } from '../services/notificationService.js';
 import { createMovement } from '../controllers/inventory.controller.js';
 import {
@@ -805,7 +807,22 @@ router.patch('/categories/:id', permissionGuard('inventory', 'canUpdate'), updat
  *       404:
  *         description: Category not found
  */
-router.delete('/categories/:id', permissionGuard('inventory', 'canDelete'), deleteCategory);
+router.get('/categories/:id/can-delete', permissionGuard('inventory', 'canDelete'), async (req: AuthRequest, res: Response) => {
+  try {
+    const report = await checkInventoryCategoryDependencies(req.params.id, req.tenantId!);
+    return res.json({ success: true, data: report });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Dependency check failed' });
+  }
+});
+
+router.delete('/categories/:id', permissionGuard('inventory', 'canDelete'), async (req: AuthRequest, res: Response) => {
+  const report = await checkInventoryCategoryDependencies(req.params.id, req.tenantId!);
+  if (!report.canDelete) {
+    return res.status(409).json({ success: false, message: 'Cannot delete: unresolved dependencies', data: report });
+  }
+  return deleteCategory(req, res);
+});
 
 /**
  * @openapi
@@ -990,7 +1007,22 @@ router.patch('/items/:id', permissionGuard('inventory', 'canUpdate'), updateProd
  *       404:
  *         description: Item not found
  */
-router.delete('/items/:id', permissionGuard('inventory', 'canDelete'), deleteProductItem);
+router.get('/items/:id/can-delete', permissionGuard('inventory', 'canDelete'), async (req: AuthRequest, res: Response) => {
+  try {
+    const report = await checkProductItemDependencies(req.params.id, req.tenantId!);
+    return res.json({ success: true, data: report });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Dependency check failed' });
+  }
+});
+
+router.delete('/items/:id', permissionGuard('inventory', 'canDelete'), async (req: AuthRequest, res: Response) => {
+  const report = await checkProductItemDependencies(req.params.id, req.tenantId!);
+  if (!report.canDelete) {
+    return res.status(409).json({ success: false, message: 'Cannot delete: unresolved dependencies', data: report });
+  }
+  return deleteProductItem(req, res);
+});
 
 // ── Maintenance logs ───────────────────────────────────────────────────────────
 

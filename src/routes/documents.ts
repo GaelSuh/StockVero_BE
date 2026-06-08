@@ -5,7 +5,6 @@ import { prisma } from '../db.js';
 import { AuthRequest } from '../types/index.js';
 import { logAudit, extractRequestContext, AuditActorType } from '../services/auditService.js';
 import { supabase, STORAGE_BUCKET } from '../lib/storage.js';
-
 const router = Router();
 router.use(tenantGuard);
 
@@ -202,6 +201,14 @@ router.patch('/:id', async (req: AuthRequest, res: Response) => {
   });
 
   return res.json({ success: true, data: updated });
+});
+
+// GET /api/v1/documents/:id/can-delete
+router.get('/:id/can-delete', async (req: AuthRequest, res: Response) => {
+  const doc = await prisma.document.findUnique({ where: { id: req.params.id } });
+  if (!doc) return res.status(404).json({ success: false, message: 'Document not found.' });
+  if (doc.tenantId !== req.tenantId) return res.status(403).json({ success: false, message: 'Access denied.' });
+  return res.json({ success: true, data: { canDelete: true, dependencies: [] } });
 });
 
 // DELETE /api/v1/documents/:id
