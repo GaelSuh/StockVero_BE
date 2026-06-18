@@ -1,5 +1,7 @@
-import { Router } from 'express';
+import { Router, Response } from 'express';
 import { tenantGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
+import { AuthRequest } from '../types/index.js';
+import { checkRoleDependencies } from '../services/dependencyCheckService.js';
 import {
   listRoles,
   getRole,
@@ -157,6 +159,21 @@ router.patch('/:id', permissionGuard('administration', 'canCreate'), updateRole)
  *       200:
  *         description: Role deleted
  */
-router.delete('/:id', permissionGuard('administration', 'canCreate'), deleteRole);
+router.get('/:id/can-delete', permissionGuard('administration', 'canCreate'), async (req: AuthRequest, res: Response) => {
+  try {
+    const report = await checkRoleDependencies(req.params.id, req.tenantId!);
+    return res.json({ success: true, data: report });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Dependency check failed' });
+  }
+});
+
+router.delete('/:id', permissionGuard('administration', 'canCreate'), async (req: AuthRequest, res: Response) => {
+  const report = await checkRoleDependencies(req.params.id, req.tenantId!);
+  if (!report.canDelete) {
+    return res.status(409).json({ success: false, message: 'Cannot delete: unresolved dependencies', data: report });
+  }
+  return deleteRole(req, res);
+});
 
 export default router;

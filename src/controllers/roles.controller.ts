@@ -173,7 +173,7 @@ export const createRole = async (req: AuthRequest, res: Response) => {
       type: 'administration.role.created',
       title: 'New Role Created',
       message: `A new role "${role.name}" (${role.abbreviation}) has been added.`,
-      link: '/administration/roles',
+      link: '/admin/roles',
     });
 
     void logAudit({
@@ -291,7 +291,7 @@ export const updateRole = async (req: AuthRequest, res: Response) => {
       type: 'administration.role.updated',
       title: 'Role Updated',
       message: `The permissions for role "${role?.name}" have been updated.`,
-      link: '/administration/roles',
+      link: '/admin/roles',
     });
 
     void logAudit({
@@ -350,7 +350,7 @@ export const deleteRole = async (req: AuthRequest, res: Response) => {
       type: 'administration.role.deleted',
       title: 'Role Deleted',
       message: `The role "${role.name}" has been removed.`,
-      link: '/administration/roles',
+      link: '/admin/roles',
     });
 
     void logAudit({
