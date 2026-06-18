@@ -946,10 +946,10 @@ export const deleteProject = async (req: AuthRequest, res: Response) => {
         message: 'Project not found',
       });
     }
-    if (project.isLocked) {
+    if (project.status !== 'CANCELLED') {
       return res.status(403).json({
         success: false,
-        message: 'This project is locked. No further changes can be made to phases or materials.',
+        message: 'Only cancelled projects can be permanently deleted.',
       });
     }
 

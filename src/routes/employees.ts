@@ -1,5 +1,7 @@
-import { Router } from 'express';
+import { Router, Response } from 'express';
 import { tenantGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
+import { AuthRequest } from '../types/index.js';
+import { checkEmployeeDependencies } from '../services/dependencyCheckService.js';
 import {
   listEmployees,
   getEmployee,
@@ -232,6 +234,21 @@ router.patch('/:id/reset-password', permissionGuard('administration', 'canCreate
  *       200:
  *         description: Employee deactivated
  */
-router.delete('/:id', permissionGuard('administration', 'canCreate'), deleteEmployee);
+router.get('/:id/can-delete', permissionGuard('administration', 'canCreate'), async (req: AuthRequest, res: Response) => {
+  try {
+    const report = await checkEmployeeDependencies(req.params.id, req.tenantId!);
+    return res.json({ success: true, data: report });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Dependency check failed' });
+  }
+});
+
+router.delete('/:id', permissionGuard('administration', 'canCreate'), async (req: AuthRequest, res: Response) => {
+  const report = await checkEmployeeDependencies(req.params.id, req.tenantId!);
+  if (!report.canDelete) {
+    return res.status(409).json({ success: false, message: 'Cannot delete: unresolved dependencies', data: report });
+  }
+  return deleteEmployee(req, res);
+});
 
 export default router;

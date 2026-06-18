@@ -503,3 +503,41 @@ export const getInvoicePdfData = async (req: AuthRequest, res: Response) => {
     });
   }
 };
+
+// ── deleteInvoice ─────────────────────────────────────────────────────────────
+
+export const deleteInvoice = async (req: AuthRequest, res: Response) => {
+  try {
+    const invoice = await (prisma as any).invoice.findFirst({
+      where: { id: req.params.id, tenantId: req.tenantId! },
+      select: { id: true, invoiceNumber: true, status: true },
+    });
+    if (!invoice) {
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+
+    await (prisma as any).invoice.delete({ where: { id: invoice.id } });
+
+    void logAudit({
+      tenantId: req.tenantId!,
+      actorType: req.user?.accountType === 'owner' ? AuditActorType.OWNER : AuditActorType.EMPLOYEE,
+      actorId: req.user?.id,
+      action: 'INVOICE_DELETED',
+      module: 'finance',
+      entityType: 'Invoice',
+      entityId: invoice.id,
+      entityLabel: invoice.invoiceNumber,
+      details: { status: invoice.status },
+      ...extractRequestContext(req),
+    });
+
+    return res.json({ success: true, message: `Invoice "${invoice.invoiceNumber}" has been permanently deleted.` });
+  } catch (error) {
+    console.error('Error deleting invoice:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete invoice',
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+};

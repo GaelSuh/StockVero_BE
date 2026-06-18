@@ -1,6 +1,8 @@
-import { Router } from 'express';
+import { Router, Response } from 'express';
 import { tenantGuard, moduleGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
 import { prisma } from '../db.js';
+import { AuthRequest } from '../types/index.js';
+import { checkProjectDependencies } from '../services/dependencyCheckService.js';
 import {
   createProject,
   listProjects as listProjectsController,
@@ -239,7 +241,22 @@ router.patch('/:id/status', permissionGuard('projects', 'canUpdate'), updateProj
  *       204:
  *         description: Project deleted
  */
-router.delete('/:id', permissionGuard('projects', 'canDelete'), deleteProject);
+router.get('/:id/can-delete', permissionGuard('projects', 'canDelete'), async (req: AuthRequest, res: Response) => {
+  try {
+    const report = await checkProjectDependencies(req.params.id, req.tenantId!);
+    return res.json({ success: true, data: report });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Dependency check failed' });
+  }
+});
+
+router.delete('/:id', permissionGuard('projects', 'canDelete'), async (req: AuthRequest, res: Response) => {
+  const report = await checkProjectDependencies(req.params.id, req.tenantId!);
+  if (!report.canDelete) {
+    return res.status(409).json({ success: false, message: 'Cannot delete: unresolved dependencies', data: report });
+  }
+  return deleteProject(req, res);
+});
 
 /**
  * @openapi

@@ -1,9 +1,9 @@
 import { Router } from 'express';
-import { tenantGuard, roleGuard, mustChangePasswordGuard } from '../middleware/auth.js';
+import { tenantGuard, roleGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
 import { getTenantModules, updateTenantModule, updateMyTenant, updateMyTenantTheme } from '../controllers/tenants.controller.js';
 
 const router = Router();
-router.use(tenantGuard, mustChangePasswordGuard, roleGuard(['SUPER_ADMIN', 'CLIENT_OWNER']));
+router.use(tenantGuard, mustChangePasswordGuard);
 
 /**
  * @openapi
@@ -21,9 +21,9 @@ router.use(tenantGuard, mustChangePasswordGuard, roleGuard(['SUPER_ADMIN', 'CLIE
  *       200:
  *         description: Tenant modules
  */
-router.patch('/me', updateMyTenant);
-router.patch('/me/theme', updateMyTenantTheme);
-router.get('/:id/modules', getTenantModules);
+router.patch('/me', permissionGuard('settings', 'canUpdate'), updateMyTenant);
+router.patch('/me/theme', permissionGuard('settings', 'canUpdate'), updateMyTenantTheme);
+router.get('/:id/modules', roleGuard(['SUPER_ADMIN', 'CLIENT_OWNER']), getTenantModules);
 
 /**
  * @openapi
@@ -56,6 +56,6 @@ router.get('/:id/modules', getTenantModules);
  *       200:
  *         description: Module updated
  */
-router.patch('/:id/modules/:key', updateTenantModule);
+router.patch('/:id/modules/:key', roleGuard(['SUPER_ADMIN', 'CLIENT_OWNER']), updateTenantModule);
 
 export default router;
