@@ -223,7 +223,7 @@ export const updateTenantModule = async (req: AuthRequest, res: Response) => {
       type: 'tenant.module.updated',
       title: 'Module Access Changed',
       message: `The ${req.params.key} module has been ${parsed.data.isEnabled ? 'enabled' : 'disabled'} for your organization.`,
-      link: '/administration',
+      link: '/admin',
     });
 
     return res.json({

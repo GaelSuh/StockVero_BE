@@ -1,6 +1,8 @@
-import { Router } from 'express';
+import { Router, Response } from 'express';
 import { tenantGuard, moduleGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
 import { prisma } from '../db.js';
+import { AuthRequest } from '../types/index.js';
+import { checkTransactionDependencies } from '../services/dependencyCheckService.js';
 import {
   createTransaction,
   listTransactionsController as listTransactionsCtrl,
@@ -249,7 +251,22 @@ router.patch('/transactions/:id', permissionGuard('finance', 'canUpdate'), updat
  *       204:
  *         description: Transaction deleted
  */
-router.delete('/transactions/:id', permissionGuard('finance', 'canDelete'), deleteTransaction);
+router.get('/transactions/:id/can-delete', permissionGuard('finance', 'canDelete'), async (req: AuthRequest, res: Response) => {
+  try {
+    const report = await checkTransactionDependencies(req.params.id, req.tenantId!);
+    return res.json({ success: true, data: report });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Dependency check failed' });
+  }
+});
+
+router.delete('/transactions/:id', permissionGuard('finance', 'canDelete'), async (req: AuthRequest, res: Response) => {
+  const report = await checkTransactionDependencies(req.params.id, req.tenantId!);
+  if (!report.canDelete) {
+    return res.status(409).json({ success: false, message: 'Cannot delete: unresolved dependencies', data: report });
+  }
+  return deleteTransaction(req, res);
+});
 
 /**
  * @openapi
