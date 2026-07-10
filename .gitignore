@@ -2,3 +2,5 @@ node_modules
 .agents
 _doc_extract
 .vscode
+.env
+.env.*
