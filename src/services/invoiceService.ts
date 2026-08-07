@@ -365,9 +365,19 @@ export async function deductUnitCost(
   });
   if (!category) return;
 
-  const invoice = await (prisma as any).invoice.findFirst({
-    where: { categoryId, status: 'APPROVED', type: 'PURCHASE' },
-  });
+  const linked = category.approvedInvoiceId
+    ? await (prisma as any).invoice.findUnique({
+        where: { id: category.approvedInvoiceId },
+      })
+    : null;
+
+  const invoice =
+    linked && linked.type === 'PURCHASE' && linked.status === 'APPROVED'
+      ? linked
+      : await (prisma as any).invoice.findFirst({
+          where: { categoryId, status: 'APPROVED', type: 'PURCHASE' },
+          orderBy: { createdAt: 'desc' },
+        });
 
   const costAmount = Number(category.costPrice ?? 0);
 
