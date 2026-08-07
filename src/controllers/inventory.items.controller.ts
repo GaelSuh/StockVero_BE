@@ -393,11 +393,35 @@ export const getCategoryById = async (req: AuthRequest, res: Response) => {
       date: log.createdAt,
     }));
 
+    // Current approved purchase invoice is the authoritative quota source
+    const approvedInvoice =
+      (category.approvedInvoiceId
+        ? invoices.find(
+            (i: any) =>
+              i.id === category.approvedInvoiceId &&
+              i.type === 'PURCHASE' &&
+              i.status === 'APPROVED',
+          )
+        : null) ??
+      invoices.find((i: any) => i.type === 'PURCHASE' && i.status === 'APPROVED') ??
+      null;
+
+    const authorisedQty: number | null =
+      approvedInvoice?.authorisedQty != null ? Number(approvedInvoice.authorisedQty) : null;
+    const addedQty: number | null =
+      approvedInvoice != null ? Number(approvedInvoice.addedQty ?? 0) : null;
+    const remainingQty: number | null =
+      authorisedQty != null && addedQty != null ? Math.max(0, authorisedQty - addedQty) : null;
+
     return res.status(200).json({
       success: true,
       message: 'Category retrieved successfully',
       data: {
         ...formatCategory(category, stats),
+        approvedInvoiceId: category.approvedInvoiceId ?? approvedInvoice?.id ?? null,
+        authorisedQty,
+        addedQty,
+        remainingQty,
         stockMovements,
         invoices,
         documents,
@@ -766,10 +790,20 @@ export const createProductItem = async (req: AuthRequest, res: Response) => {
     }
 
     // Guard: authorised quantity check
-    const approvedInvoice = await (prisma as any).invoice.findFirst({
-      where: { categoryId, tenantId, type: 'PURCHASE', status: 'APPROVED' },
-      orderBy: { createdAt: 'desc' },
-    });
+    const linkedApproved = category.approvedInvoiceId
+      ? await (prisma as any).invoice.findUnique({
+          where: { id: category.approvedInvoiceId },
+        })
+      : null;
+    const approvedInvoice =
+      linkedApproved &&
+      linkedApproved.type === 'PURCHASE' &&
+      linkedApproved.status === 'APPROVED'
+        ? linkedApproved
+        : await (prisma as any).invoice.findFirst({
+            where: { categoryId, tenantId, type: 'PURCHASE', status: 'APPROVED' },
+            orderBy: { createdAt: 'desc' },
+          });
     if (approvedInvoice) {
       const authorisedQty: number = approvedInvoice.authorisedQty ?? 0;
       const addedQty: number = approvedInvoice.addedQty ?? 0;
