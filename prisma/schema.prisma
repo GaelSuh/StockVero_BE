@@ -29,7 +29,12 @@ model Tenant {
   nextBillingDate            DateTime?                   @map("next_billing_date")
   currentMonthlyAmount       Decimal?                    @map("current_monthly_amount") @db.Decimal(15, 2)
   currentAnnualAmount        Decimal?                    @map("current_annual_amount") @db.Decimal(15, 2)
+  organizationType           OrganizationType?           @map("organization_type")
   themeConfig                Json?                       @map("theme_config")
+  /// Tenant-level behaviour switches. Known keys:
+  ///   stockApprovalRequired: boolean — finance must approve a purchase invoice
+  ///   before serialised units can be added. Absent means true (legacy behaviour).
+  settingsConfig             Json?                       @map("settings_config")
   createdAt                  DateTime                    @default(now()) @map("created_at")
   updatedAt                  DateTime                    @updatedAt @map("updated_at")
   activityLogs               AuditLog[]
@@ -48,6 +53,7 @@ model Tenant {
   notifications              Notification[]
   paymentMethods             PaymentMethod[]
   paymentTransactions        PaymentTransaction[]
+  productCategories          ProductCategory[]
   productItemMaintenanceLogs ProductItemMaintenanceLog[]
   productItems               ProductItem[]
   projectAssignments         ProjectAssignment[]
@@ -65,6 +71,12 @@ model Tenant {
   transactions               Transaction[]
   userPreferences            UserPreference[]
   users                      User[]
+  sales                      Sale[]
+  saleReturns                SaleReturn[]
+  priceLists                 PriceList[]
+  deliveryNotes              DeliveryNote[]
+  dailySummaries             DailySummary[]
+  saleSequence               SaleSequence?
 
   @@map("tenants")
 }
@@ -331,12 +343,39 @@ model InventoryItem {
   @@map("inventory_items")
 }
 
+model ProductCategory {
+  id             String              @id @default(uuid())
+  tenantId       String              @map("tenant_id")
+  name           String
+  normalizedName String              @map("normalized_name")
+  createdAt      DateTime            @default(now()) @map("created_at")
+  updatedAt      DateTime            @updatedAt @map("updated_at")
+  tenant         Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  products       InventoryCategory[]
+
+  @@unique([tenantId, normalizedName])
+  @@index([tenantId])
+  @@map("product_categories")
+}
+
 model InventoryCategory {
   id                String             @id @default(uuid())
   tenantId          String             @map("tenant_id")
   sku               String
   abbreviation      String
   name              String
+  barcode           String?
+  productCategoryId String?            @map("product_category_id")
+  /// How this product's stock is counted. SERIALIZED counts ProductItem rows
+  /// (the Installation model); QUANTITY reads quantityOnHand directly.
+  stockTrackingMode StockTrackingMode  @default(SERIALIZED) @map("stock_tracking_mode")
+  /// Whether each physical unit carries its own barcode (a phone's IMEI) or every
+  /// unit shares one product barcode (most solar panels). Null means nobody has
+  /// said yet — receiving stock asks once, then remembers.
+  hasUniquePerUnitBarcode Boolean?     @map("has_unique_per_unit_barcode")
+  /// Live on-hand count for QUANTITY products. Distinct from plannedQty, which
+  /// keeps its original meaning: the purchase quantity authorised on an invoice.
+  quantityOnHand    Int                @default(0) @map("quantity_on_hand")
   description       String?
   supplier          String?
   unit              String?
@@ -358,12 +397,17 @@ model InventoryCategory {
   stockLogs         CategoryStockLog[]
   customerPurchases CustomerPurchase[]
   tenant            Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  productCategory   ProductCategory?   @relation(fields: [productCategoryId], references: [id], onDelete: SetNull)
   invoices          Invoice[]
   productItems      ProductItem[]
   projectMaterials  ProjectMaterial[]  @relation("CategoryProjectMaterials")
+  saleItems         SaleItem[]
+  priceRules        PriceRule[]
 
   @@unique([tenantId, sku])
   @@index([tenantId])
+  @@index([tenantId, productCategoryId])
+  @@index([tenantId, barcode])
   @@map("inventory_categories")
 }
 
@@ -422,10 +466,14 @@ model CategoryStockLog {
   title        String
   notes        String?
   performedBy  String?           @map("performed_by")
+  /// Id the device generated when the stock movement was recorded offline. Makes
+  /// a replayed sync idempotent — the same delivery cannot be received twice.
+  offlineId    String?           @map("offline_id")
   createdAt    DateTime          @default(now()) @map("created_at")
   category     InventoryCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   tenant       Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
+  @@unique([tenantId, offlineId])
   @@index([tenantId, categoryId])
   @@map("category_stock_logs")
 }
@@ -471,23 +519,25 @@ model StockMovement {
 }
 
 model Customer {
-  id             String             @id @default(uuid())
-  tenantId       String             @map("tenant_id")
-  name           String
-  email          String?
-  phone          String?
-  location       String?
-  address        String?
-  avatarUrl      String?            @map("avatar_url")
-  initialRevenue Decimal?           @map("initial_revenue") @db.Decimal(15, 2)
-  status         CustomerStatus     @default(ACTIVE)
-  notes          String?
-  createdAt      DateTime           @default(now()) @map("created_at")
-  updatedAt      DateTime           @updatedAt @map("updated_at")
-  contacts       CustomerContact[]
-  purchases      CustomerPurchase[]
-  tenant         Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  projects       Project[]
+  id                 String              @id @default(uuid())
+  tenantId           String              @map("tenant_id")
+  name               String
+  email              String?
+  phone              String?
+  location           String?
+  address            String?
+  avatarUrl          String?             @map("avatar_url")
+  initialRevenue     Decimal?            @map("initial_revenue") @db.Decimal(15, 2)
+  status             CustomerStatus      @default(ACTIVE)
+  notes              String?
+  createdAt          DateTime            @default(now()) @map("created_at")
+  updatedAt          DateTime            @updatedAt @map("updated_at")
+  contacts           CustomerContact[]
+  purchases          CustomerPurchase[]
+  tenant             Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  projects           Project[]
+  sales              Sale[]
+  customerPriceLists CustomerPriceList[]
 
   @@index([tenantId])
   @@map("customers")
@@ -665,6 +715,7 @@ model Transaction {
   invoicePayment InvoicePayment?
   project        Project?          @relation(fields: [projectId], references: [id])
   tenant         Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sale           Sale?
 
   @@index([tenantId])
   @@index([tenantId, type])
@@ -951,6 +1002,11 @@ enum IdentifierType {
   NONE
 }
 
+enum StockTrackingMode {
+  SERIALIZED
+  QUANTITY
+}
+
 enum ProductType {
   STOCK
   INVENTORY
@@ -1065,4 +1121,325 @@ enum AuditActorType {
 enum AuditStatus {
   SUCCESS
   FAILURE
+}
+
+// ─── POS: Retail & Wholesale Module Enums ───
+
+enum OrganizationType {
+  RETAIL_SHOP
+  WHOLESALE_DISTRIBUTION
+  MANUFACTURING
+  SERVICE_INSTALLATION
+}
+
+enum SaleMode {
+  RETAIL
+  WHOLESALE
+}
+
+enum SaleStatus {
+  DRAFT
+  COMPLETED
+  PARTIAL
+  CANCELLED
+  RETURNED
+}
+
+enum SalePaymentStatus {
+  PAID
+  PARTIAL
+  CREDIT
+  REFUNDED
+}
+
+enum SalePaymentMethod {
+  CASH
+  MTN_MOMO
+  ORANGE_MONEY
+  CARD
+  BANK_TRANSFER
+  OTHER
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED
+}
+
+enum ReturnType {
+  REFUND
+  EXCHANGE
+}
+
+enum DeliveryStatus {
+  PENDING
+  DISPATCHED
+  IN_TRANSIT
+  DELIVERED
+  PARTIAL_DELIVERY
+}
+
+// ─── POS: Retail & Wholesale Module Models ───
+
+model Sale {
+  id         String     @id @default(uuid())
+  tenantId   String     @map("tenant_id")
+  saleNumber String     @map("sale_number")
+  mode       SaleMode
+  status     SaleStatus @default(COMPLETED)
+
+  customerId String? @map("customer_id")
+  customerName String? @map("customer_name")
+
+  soldById   String               @map("sold_by_id")
+  soldByType NotificationUserType @map("sold_by_type")
+  soldByName String               @map("sold_by_name")
+
+  subtotal       Decimal       @db.Decimal(15, 2)
+  discountType   DiscountType? @map("discount_type")
+  discountValue  Decimal?      @map("discount_value") @db.Decimal(15, 2)
+  discountAmount Decimal       @default(0) @map("discount_amount") @db.Decimal(15, 2)
+  taxAmount      Decimal       @default(0) @map("tax_amount") @db.Decimal(15, 2)
+  totalAmount    Decimal       @map("total_amount") @db.Decimal(15, 2)
+
+  paymentStatus SalePaymentStatus @default(PAID) @map("payment_status")
+  amountPaid    Decimal           @map("amount_paid") @db.Decimal(15, 2)
+  amountOwed    Decimal           @default(0) @map("amount_owed") @db.Decimal(15, 2)
+  creditDueDate DateTime?         @map("credit_due_date")
+
+  deliveryStatus  DeliveryStatus? @map("delivery_status")
+  deliveryNotes   String?         @map("delivery_notes_text")
+  minimumOrderMet Boolean?        @map("minimum_order_met")
+
+  offlineId      String?   @unique @map("offline_id")
+  createdOffline Boolean   @default(false) @map("created_offline")
+  syncedAt       DateTime? @map("synced_at")
+
+  transactionId String? @unique @map("transaction_id")
+
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant            Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer          Customer?      @relation(fields: [customerId], references: [id])
+  transaction       Transaction?   @relation(fields: [transactionId], references: [id])
+  items             SaleItem[]
+  payments          SalePayment[]
+  returns           SaleReturn[]
+  saleDeliveryNotes DeliveryNote[]
+
+  @@unique([tenantId, saleNumber])
+  @@index([tenantId, createdAt])
+  @@index([tenantId, customerId])
+  @@index([tenantId, mode])
+  @@index([tenantId, paymentStatus])
+  @@map("sales")
+}
+
+model SaleItem {
+  id         String @id @default(uuid())
+  saleId     String @map("sale_id")
+  categoryId String @map("category_id")
+
+  productName String  @map("product_name")
+  sku         String?
+  unitPrice   Decimal @map("unit_price") @db.Decimal(15, 2)
+  quantity    Int
+
+  discountType   DiscountType? @map("discount_type")
+  discountValue  Decimal?      @map("discount_value") @db.Decimal(15, 2)
+  discountAmount Decimal       @default(0) @map("discount_amount") @db.Decimal(15, 2)
+
+  lineTotal Decimal @map("line_total") @db.Decimal(15, 2)
+
+  batchNumber String? @map("batch_number")
+  lotNumber   String? @map("lot_number")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  sale     Sale              @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  category InventoryCategory @relation(fields: [categoryId], references: [id])
+
+  @@index([saleId])
+  @@index([categoryId])
+  @@map("sale_items")
+}
+
+model SalePayment {
+  id        String            @id @default(uuid())
+  saleId    String            @map("sale_id")
+  method    SalePaymentMethod
+  amount    Decimal           @db.Decimal(15, 2)
+  reference String?
+
+  paidAt         DateTime @default(now()) @map("paid_at")
+  recordedById   String   @map("recorded_by_id")
+  recordedByName String   @map("recorded_by_name")
+
+  sale Sale @relation(fields: [saleId], references: [id], onDelete: Cascade)
+
+  @@index([saleId])
+  @@map("sale_payments")
+}
+
+model SaleReturn {
+  id           String @id @default(uuid())
+  tenantId     String @map("tenant_id")
+  saleId       String @map("sale_id")
+  returnNumber String @map("return_number")
+
+  reason     String
+  returnType ReturnType @map("return_type")
+
+  refundAmount Decimal            @map("refund_amount") @db.Decimal(15, 2)
+  refundMethod SalePaymentMethod? @map("refund_method")
+
+  processedById   String @map("processed_by_id")
+  processedByName String @map("processed_by_name")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sale   Sale             @relation(fields: [saleId], references: [id])
+  items  SaleReturnItem[]
+
+  @@unique([tenantId, returnNumber])
+  @@index([tenantId])
+  @@index([saleId])
+  @@map("sale_returns")
+}
+
+model SaleReturnItem {
+  id          String  @id @default(uuid())
+  returnId    String  @map("return_id")
+  categoryId  String  @map("category_id")
+  productName String  @map("product_name")
+  quantity    Int
+  unitPrice   Decimal @map("unit_price") @db.Decimal(15, 2)
+
+  saleReturn SaleReturn @relation(fields: [returnId], references: [id], onDelete: Cascade)
+
+  @@index([returnId])
+  @@map("sale_return_items")
+}
+
+model PriceList {
+  id          String  @id @default(uuid())
+  tenantId    String  @map("tenant_id")
+  name        String
+  description String?
+  isDefault   Boolean @default(false) @map("is_default")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant    Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  rules     PriceRule[]
+  customers CustomerPriceList[]
+
+  @@index([tenantId])
+  @@map("price_lists")
+}
+
+model PriceRule {
+  id          String  @id @default(uuid())
+  priceListId String  @map("price_list_id")
+  categoryId  String  @map("category_id")
+  minQuantity Int     @default(1) @map("min_quantity")
+  unitPrice   Decimal @map("unit_price") @db.Decimal(15, 2)
+
+  priceList PriceList         @relation(fields: [priceListId], references: [id], onDelete: Cascade)
+  category  InventoryCategory @relation(fields: [categoryId], references: [id])
+
+  @@unique([priceListId, categoryId, minQuantity])
+  @@index([priceListId])
+  @@index([categoryId])
+  @@map("price_rules")
+}
+
+model CustomerPriceList {
+  id          String @id @default(uuid())
+  customerId  String @map("customer_id")
+  priceListId String @map("price_list_id")
+
+  customer  Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  priceList PriceList @relation(fields: [priceListId], references: [id], onDelete: Cascade)
+
+  @@unique([customerId, priceListId])
+  @@index([customerId])
+  @@index([priceListId])
+  @@map("customer_price_lists")
+}
+
+model DeliveryNote {
+  id         String         @id @default(uuid())
+  tenantId   String         @map("tenant_id")
+  saleId     String         @map("sale_id")
+  noteNumber String         @map("note_number")
+  status     DeliveryStatus @default(PENDING)
+
+  dispatchedAt DateTime? @map("dispatched_at")
+  deliveredAt  DateTime? @map("delivered_at")
+
+  driverName  String? @map("driver_name")
+  vehicleInfo String? @map("vehicle_info")
+  notes       String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sale   Sale               @relation(fields: [saleId], references: [id])
+  items  DeliveryNoteItem[]
+
+  @@unique([tenantId, noteNumber])
+  @@index([tenantId])
+  @@index([saleId])
+  @@map("delivery_notes")
+}
+
+model DeliveryNoteItem {
+  id               String @id @default(uuid())
+  deliveryNoteId   String @map("delivery_note_id")
+  saleItemId       String @map("sale_item_id")
+  quantityShipped  Int    @map("quantity_shipped")
+  quantityReceived Int?   @map("quantity_received")
+
+  deliveryNote DeliveryNote @relation(fields: [deliveryNoteId], references: [id], onDelete: Cascade)
+
+  @@index([deliveryNoteId])
+  @@map("delivery_note_items")
+}
+
+model DailySummary {
+  id       String   @id @default(uuid())
+  tenantId String   @map("tenant_id")
+  date     DateTime @db.Date
+
+  totalSales           Int     @default(0) @map("total_sales")
+  totalRevenue         Decimal @default(0) @map("total_revenue") @db.Decimal(15, 2)
+  cashCollected        Decimal @default(0) @map("cash_collected") @db.Decimal(15, 2)
+  mobileMoneyCollected Decimal @default(0) @map("mobile_money_collected") @db.Decimal(15, 2)
+  cardCollected        Decimal @default(0) @map("card_collected") @db.Decimal(15, 2)
+  creditGiven          Decimal @default(0) @map("credit_given") @db.Decimal(15, 2)
+  returnsTotal         Decimal @default(0) @map("returns_total") @db.Decimal(15, 2)
+
+  generatedAt DateTime @default(now()) @map("generated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, date])
+  @@index([tenantId])
+  @@map("daily_summaries")
+}
+
+model SaleSequence {
+  id       String @id @default(uuid())
+  tenantId String @unique @map("tenant_id")
+  lastSeq  Int    @default(0) @map("last_seq")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("sale_sequences")
 }

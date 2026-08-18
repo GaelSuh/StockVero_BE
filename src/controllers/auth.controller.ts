@@ -5,6 +5,7 @@ import { prisma } from '../db.js';
 import { generateToken, verifyToken } from '../lib/jwt.js';
 import { MODULE_KEYS, MODULES_CONFIG, OWNER_PERMANENT_MODULES } from '../config/modules.js';
 import { isValidSlug, generateSlug } from '../lib/slug.js';
+import { defaultSettingsForSignup, readTenantSettings } from '../lib/tenantSettings.js';
 import { AuthRequest, Permission } from '../types/index.js';
 import { UserRole } from '@prisma/client';
 import {
@@ -216,6 +217,9 @@ export const signup = async (req: Request, res: Response) => {
         currentMonthlyAmount: toDecimal(pricing.monthlyTotal),
         currentAnnualAmount: toDecimal(pricing.annualTotal),
         themeConfig: theme || getDefaultTheme(),
+        // Shops and distributors put stock straight on the shelf; project-based
+        // businesses keep finance approval in front of it.
+        settingsConfig: defaultSettingsForSignup({ selectedModules }) as any,
         status: 'PENDING_APPROVAL',
         users: {
           create: {
@@ -501,6 +505,7 @@ export const login = async (req: Request, res: Response) => {
             id: user.tenant.id,
             name: user.tenant.name,
             theme: user.tenant.themeConfig,
+          settings: readTenantSettings(user.tenant),
             logoUrl,
           },
         },
@@ -642,6 +647,7 @@ export const login = async (req: Request, res: Response) => {
           id: employee.tenant.id,
           name: employee.tenant.name,
           theme: employee.tenant.themeConfig,
+          settings: readTenantSettings(employee.tenant),
           logoUrl: employeeLogoUrl,
         },
         userTheme: empPref?.themeConfig ?? null,
@@ -939,6 +945,7 @@ export const me = async (req: AuthRequest, res: Response) => {
             name: user.tenant.name,
             subdomain: user.tenant.subdomain,
             theme: user.tenant.themeConfig,
+          settings: readTenantSettings(user.tenant),
             logoUrl,
           },
           userTheme: ownerPref?.themeConfig ?? null,
@@ -1008,6 +1015,7 @@ export const me = async (req: AuthRequest, res: Response) => {
           name: employee.tenant.name,
           subdomain: employee.tenant.subdomain,
           theme: employee.tenant.themeConfig,
+          settings: readTenantSettings(employee.tenant),
           logoUrl: employeeLogoUrl,
         },
         userTheme: mePref?.themeConfig ?? null,

@@ -27,6 +27,10 @@ import invoicesRoutes from './routes/invoices.js';
 import auditRoutes from './routes/audit.js';
 import devRoutes from './routes/dev.js';
 import usersRoutes from './routes/users.js';
+import salesRoutes from './routes/sales.js';
+import returnsRoutes from './routes/returns.js';
+import priceListsRoutes from './routes/price-lists.js';
+import deliveryRoutes from './routes/delivery.js';
 import { startCronJobs } from './services/scheduler.js';
 
 const app: Express = express();
@@ -99,6 +103,10 @@ app.use('/api/v1/documents', apiLimiter, documentsRoutes);
 app.use('/api/v1/invoices', apiLimiter, invoicesRoutes);
 app.use('/api/v1/audit', apiLimiter, auditRoutes);
 app.use('/api/v1/users', apiLimiter, usersRoutes);
+app.use('/api/v1/sales', apiLimiter, salesRoutes);
+app.use('/api/v1/returns', apiLimiter, returnsRoutes);
+app.use('/api/v1/price-lists', apiLimiter, priceListsRoutes);
+app.use('/api/v1/delivery-notes', apiLimiter, deliveryRoutes);
 app.use('/api/admin/v1', authLimiter, adminRoutes);
 
 if (process.env.NODE_ENV !== 'production') {

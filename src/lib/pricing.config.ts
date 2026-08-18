@@ -35,6 +35,18 @@ export const PRICING_MODULES = [
     description: "Business insights and reporting",
     monthlyPrice: 3500,
   },
+  {
+    key: "retail_sales",
+    displayName: "Retail Sales",
+    description: "Point of sale for retail counter selling",
+    monthlyPrice: 5000,
+  },
+  {
+    key: "wholesale_sales",
+    displayName: "Wholesale Sales",
+    description: "Bulk order management for B2B selling",
+    monthlyPrice: 5500,
+  },
 ] as const;
 
 export const PRICING_MODULE_KEYS: string[] = PRICING_MODULES.map((m) => m.key);

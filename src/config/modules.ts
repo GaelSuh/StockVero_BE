@@ -9,6 +9,8 @@ export const MODULE_KEYS = {
   SETTINGS: 'settings',
   ADMINISTRATION: 'administration',
   AUDIT: 'audit',
+  RETAIL_SALES: 'retail_sales',
+  WHOLESALE_SALES: 'wholesale_sales',
 } as const;
 
 /** Modules permanently enabled for owner accounts regardless of DB state */
@@ -80,5 +82,17 @@ export const MODULES_CONFIG = [
     displayName: 'Audit Log',
     description: 'System-wide activity and change history',
     table: 'audit_logs',
+  },
+  {
+    key: MODULE_KEYS.RETAIL_SALES,
+    displayName: 'Retail Sales',
+    description: 'Point of sale for retail counter selling',
+    table: 'sales',
+  },
+  {
+    key: MODULE_KEYS.WHOLESALE_SALES,
+    displayName: 'Wholesale Sales',
+    description: 'Bulk order management for B2B selling',
+    table: 'sales',
   },
 ];

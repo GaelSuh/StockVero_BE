@@ -96,17 +96,21 @@ export async function checkInventoryCategoryDependencies(
     });
   }
 
-  // 3. Deployed or In-Use product items
-  const deployedCount = await (prisma as any).productItem.count({
-    where: {
-      categoryId,
-      tenantId,
-      OR: [
-        { stockStatus: 'DEPLOYED' },
-        { inventoryStatus: 'IN_USE' },
-      ],
-    },
-  });
+  // 3. Serialised units.
+  //    Any unit at all blocks deletion — the database refuses to drop a product
+  //    that units still point at, and the single-delete endpoint has always
+  //    rejected this case. Deployed units get the more specific message.
+  const [totalUnits, deployedCount] = await Promise.all([
+    (prisma as any).productItem.count({ where: { categoryId, tenantId } }),
+    (prisma as any).productItem.count({
+      where: {
+        categoryId,
+        tenantId,
+        OR: [{ stockStatus: 'DEPLOYED' }, { inventoryStatus: 'IN_USE' }],
+      },
+    }),
+  ]);
+
   if (deployedCount > 0) {
     deps.push({
       module: 'Inventory',
@@ -114,9 +118,102 @@ export async function checkInventoryCategoryDependencies(
       count: deployedCount,
       action: 'Return them first',
     });
+  } else if (totalUnits > 0) {
+    deps.push({
+      module: 'Inventory',
+      description: `${totalUnits} serialised unit(s) are recorded against this product`,
+      count: totalUnits,
+      action: 'Delete those units first',
+    });
+  }
+
+  // 4. Sold on retail or wholesale sales.
+  //    A sale line points at this product, so deleting it would break the sale
+  //    record (and the database's foreign key refuses it outright). The sale has
+  //    to be cancelled or deleted before the product can go.
+  const soldLines = await (prisma as any).saleItem.findMany({
+    where: { categoryId, sale: { tenantId } },
+    select: {
+      quantity: true,
+      sale: { select: { id: true, saleNumber: true, mode: true } },
+    },
+    orderBy: { id: 'desc' },
+    take: 5,
+  });
+
+  if (soldLines.length > 0) {
+    const [saleCount, unitsSold] = await Promise.all([
+      (prisma as any).saleItem
+        .groupBy({ by: ['saleId'], where: { categoryId, sale: { tenantId } }, _count: true })
+        .then((rows: any[]) => rows.length),
+      (prisma as any).saleItem
+        .aggregate({ where: { categoryId, sale: { tenantId } }, _sum: { quantity: true } })
+        .then((r: any) => Number(r._sum?.quantity ?? 0)),
+    ]);
+
+    deps.push({
+      module: 'Sales',
+      description: `Sold on ${saleCount} sale(s) — ${unitsSold} unit(s) in total`,
+      count: saleCount,
+      action: 'Delete or cancel those sales before removing this product',
+      links: soldLines
+        .filter((line: any) => line.sale)
+        .slice(0, 5)
+        .map((line: any) => ({
+          id: line.sale.id,
+          label: line.sale.saleNumber,
+          route: `/${line.sale.mode === 'RETAIL' ? 'retail-sales' : 'wholesale-sales'}/${line.sale.id}`,
+        })),
+    });
+  }
+
+  // 5. Referenced by wholesale price lists
+  const priceRuleCount = await (prisma as any).priceRule.count({
+    where: { categoryId, priceList: { tenantId } },
+  });
+  if (priceRuleCount > 0) {
+    deps.push({
+      module: 'Price Lists',
+      description: `Priced on ${priceRuleCount} price list rule(s)`,
+      count: priceRuleCount,
+      action: 'Remove it from those price lists first',
+    });
+  }
+
+  // 6. Recorded against a customer's purchase history
+  const purchaseCount = await (prisma as any).customerPurchase.count({
+    where: { inventoryCategoryId: categoryId, tenantId },
+  });
+  if (purchaseCount > 0) {
+    deps.push({
+      module: 'Customers',
+      description: `Appears in ${purchaseCount} customer purchase record(s)`,
+      count: purchaseCount,
+      action: 'Remove those purchase records first',
+    });
   }
 
   return { canDelete: !isBlocked(deps), dependencies: deps };
+}
+
+/**
+ * Runs the same check over many products at once, for the bulk-delete preview.
+ * Kept sequential-per-id on purpose: each report is a handful of small counts and
+ * a selection is capped well below the point where this matters.
+ */
+export async function checkInventoryCategoriesDependencies(
+  categoryIds: string[],
+  tenantId: string,
+): Promise<Map<string, DependencyReport>> {
+  const reports = new Map<string, DependencyReport>();
+  const results = await Promise.all(
+    categoryIds.map(async (id) => ({
+      id,
+      report: await checkInventoryCategoryDependencies(id, tenantId),
+    })),
+  );
+  for (const { id, report } of results) reports.set(id, report);
+  return reports;
 }
 
 // ── Inventory Product Item ────────────────────────────────────────────────────

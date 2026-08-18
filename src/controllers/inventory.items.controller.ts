@@ -6,12 +6,18 @@ import { broadcastToModule } from '../services/notificationService.js';
 import { createPurchaseInvoice, deductUnitCost } from '../services/invoiceService.js';
 import { generateSystemId } from '../utils/generateSystemId.js';
 import { deleteStorageFiles } from '../lib/storage.js';
+import { getAvailableStock, isQuantityTracked, resolveStockStatus } from '../lib/stock.js';
+import { stockApprovalRequired } from '../lib/tenantSettings.js';
+import { addQuantityStock } from '../services/quantityStockService.js';
 import { logAudit, extractRequestContext, buildDiff, AuditActorType } from '../services/auditService.js';
 
 // ── Shared helpers ─────────────────────────────────────────────────────────────
 
 export const fetchCategoryById = (tenantId: string, id: string) =>
-  (prisma as any).inventoryCategory.findFirst({ where: { tenantId, id } });
+  (prisma as any).inventoryCategory.findFirst({
+    where: { tenantId, id },
+    include: { productCategory: true },
+  });
 
 // ── Stock event logger ────────────────────────────────────────────────────────
 
@@ -113,6 +119,15 @@ export const CategorySchema = z.object({
   name: z.string().min(1),
   abbreviation: z.string().min(1).max(8),
   type: z.enum(['STOCK', 'INVENTORY']).optional(),
+  barcode: z.string().max(64).optional().or(z.literal('')),
+  productCategoryId: z.string().optional().or(z.literal('')),
+  unit: z.string().max(24).optional().or(z.literal('')),
+  stockTrackingMode: z.enum(['SERIALIZED', 'QUANTITY']).optional(),
+  /** Set the first time stock is received by scanning; remembered thereafter. */
+  hasUniquePerUnitBarcode: z.boolean().optional(),
+  quantityOnHand: z.coerce.number().int().nonnegative().optional(),
+  /** False when recording stock the business already owns — no expense is booked. */
+  isNewPurchase: z.boolean().optional(),
   description: z.string().optional(),
   supplier: z.string().optional(),
   costPrice: z.coerce.number().nonnegative().optional(),
@@ -260,22 +275,27 @@ const buildBatchCategoryStats = async (tenantId: string, categories: Array<{ id:
   return result;
 };
 
-const resolveStockStatus = (availableCount: number, reorderThreshold: number) => {
-  if (availableCount === 0) return 'OUT_OF_STOCK';
-  if (availableCount <= reorderThreshold) return 'LOW_STOCK';
-  return 'IN_STOCK';
-};
-
 type CategoryStats = Awaited<ReturnType<typeof buildCategoryStats>>;
 
 const formatCategory = (cat: any, stats: CategoryStats) => {
   const isStock = (cat.type ?? 'STOCK') === 'STOCK';
-  const availableCount = stats.availableCount;
+  // Quantity-tracked products have no unit rows; their stock is the column.
+  const availableCount = getAvailableStock(cat, stats.availableCount);
+  const valuedCount = isQuantityTracked(cat)
+    ? availableCount
+    : isStock
+      ? availableCount
+      : stats.totalItems;
   return {
     id: cat.id,
     name: cat.name,
     abbreviation: cat.abbreviation ?? cat.sku,
     type: cat.type ?? 'STOCK',
+    barcode: cat.barcode ?? null,
+    productCategoryId: cat.productCategoryId ?? null,
+    productCategory: cat.productCategory
+      ? { id: cat.productCategory.id, name: cat.productCategory.name }
+      : null,
     description: cat.description,
     supplier: cat.supplier,
     unit: cat.unit,
@@ -291,13 +311,121 @@ const formatCategory = (cat: any, stats: CategoryStats) => {
     imageUrl: cat.imageUrl,
     images: Array.isArray(cat.images) ? cat.images : [],
     notes: cat.notes,
+    stockTrackingMode: cat.stockTrackingMode ?? 'SERIALIZED',
+    quantityOnHand: cat.quantityOnHand ?? 0,
+    hasUniquePerUnitBarcode: cat.hasUniquePerUnitBarcode ?? null,
     ...stats,
+    // Overrides the unit-count figure from stats for quantity-tracked products.
+    availableCount,
     // stockStatus is only meaningful for STOCK categories
     stockStatus: isStock ? resolveStockStatus(availableCount, cat.reorderThreshold) : null,
-    // totalValue: for STOCK = costPrice × available; for INVENTORY = costPrice × all owned items
-    totalValue: Number(cat.costPrice ?? 0) * (isStock ? availableCount : stats.totalItems),
+    // totalValue: costPrice × on-hand (STOCK / quantity) or × all owned items (INVENTORY)
+    totalValue: Number(cat.costPrice ?? 0) * valuedCount,
     createdAt: cat.createdAt,
     updatedAt: cat.updatedAt,
+  };
+};
+
+const EMPTY_SUMMARY = {
+  total: 0,
+  inStock: 0,
+  lowStock: 0,
+  outOfStock: 0,
+  available: 0,
+  inUse: 0,
+  maintenance: 0,
+  faulty: 0,
+  totalValue: 0,
+};
+
+/**
+ * Walks every product matching the current filter and works out its on-hand
+ * quantity and stock status. Feeds both the stat cards (which must describe the
+ * whole catalogue, not the page on screen) and the low-stock quick filter, which
+ * cannot be a plain WHERE clause because stock status is derived.
+ *
+ * Reads five columns plus grouped unit counts, so it stays cheap as stock grows.
+ */
+const computeCategoryStatuses = async (tenantId: string, where: any) => {
+  const categories = await (prisma as any).inventoryCategory.findMany({
+    where,
+    select: {
+      id: true,
+      type: true,
+      costPrice: true,
+      reorderThreshold: true,
+      stockTrackingMode: true,
+      quantityOnHand: true,
+    },
+  });
+
+  if (categories.length === 0) {
+    return { rows: [] as Array<{ id: string; status: string | null }>, summary: EMPTY_SUMMARY };
+  }
+
+  const ids = categories.map((c: any) => c.id);
+  const countBy = async (field: 'stockStatus' | 'inventoryStatus', statuses: string[]) => {
+    const rows = await (prisma as any).productItem.groupBy({
+      by: ['categoryId'],
+      where: { tenantId, categoryId: { in: ids }, [field]: { in: statuses } },
+      _count: { id: true },
+    });
+    const map: Record<string, number> = {};
+    for (const row of rows) map[row.categoryId] = row._count.id;
+    return map;
+  };
+
+  const [stockAvailable, invAvailable, stockDeployed, invInUse, maintenance, faulty] =
+    await Promise.all([
+      countBy('stockStatus', ['AVAILABLE']),
+      countBy('inventoryStatus', ['AVAILABLE']),
+      countBy('stockStatus', ['DEPLOYED']),
+      countBy('inventoryStatus', ['IN_USE']),
+      countBy('stockStatus', ['UNDER_MAINTENANCE']),
+      countBy('stockStatus', ['FAULTY', 'COMPLETELY_BAD']),
+    ]);
+
+  let inStock = 0;
+  let lowStock = 0;
+  let outOfStock = 0;
+  let available = 0;
+  let inUse = 0;
+  let totalValue = 0;
+  const rows: Array<{ id: string; status: string | null }> = [];
+
+  for (const cat of categories) {
+    const isStock = (cat.type ?? 'STOCK') === 'STOCK';
+    const units = isStock ? (stockAvailable[cat.id] ?? 0) : (invAvailable[cat.id] ?? 0);
+    const onHand = getAvailableStock(cat, units);
+
+    available += onHand;
+    inUse += isStock ? (stockDeployed[cat.id] ?? 0) : (invInUse[cat.id] ?? 0);
+    totalValue += Number(cat.costPrice ?? 0) * onHand;
+
+    const status = isStock ? resolveStockStatus(onHand, cat.reorderThreshold ?? 0) : null;
+    rows.push({ id: cat.id, status });
+
+    if (status === 'IN_STOCK') inStock += 1;
+    else if (status === 'LOW_STOCK') lowStock += 1;
+    else if (status === 'OUT_OF_STOCK') outOfStock += 1;
+  }
+
+  const sum = (map: Record<string, number>) =>
+    Object.values(map).reduce((total, n) => total + n, 0);
+
+  return {
+    rows,
+    summary: {
+      total: categories.length,
+      inStock,
+      lowStock,
+      outOfStock,
+      available,
+      inUse,
+      maintenance: sum(maintenance),
+      faulty: sum(faulty),
+      totalValue,
+    },
   };
 };
 
@@ -316,16 +444,47 @@ export const listCategories = async (req: AuthRequest, res: Response) => {
         { name: { contains: search, mode: 'insensitive' } },
         { abbreviation: { contains: search, mode: 'insensitive' } },
         { sku: { contains: search, mode: 'insensitive' } },
+        { barcode: { contains: search, mode: 'insensitive' } },
       ];
     }
     if (typeFilter === 'STOCK' || typeFilter === 'INVENTORY') {
       where.type = typeFilter;
     }
 
+    // Pagination is opt-in: callers that just want the whole list (the POS picker,
+    // the product dropdowns) keep getting a plain array by not sending `page`.
+    const pageParam = req.query.page ? parseInt(req.query.page as string, 10) : null;
+    const paginated = pageParam !== null && Number.isFinite(pageParam);
+    const page = paginated ? Math.max(1, pageParam as number) : 1;
+    const pageSize = limit && limit > 0 ? limit : 20;
+
+    // Stock status is derived from unit counts, so the low-stock quick filter is
+    // resolved to a set of ids first. The summary is built from the unfiltered
+    // set so the stat cards keep showing catalogue totals while it is applied.
+    const stockStatusFilter = req.query.stockStatus ? String(req.query.stockStatus) : undefined;
+    let summary = EMPTY_SUMMARY;
+
+    if (paginated) {
+      const computed = await computeCategoryStatuses(tenantId, where);
+      summary = computed.summary;
+      if (stockStatusFilter) {
+        where.id = {
+          in: computed.rows.filter((r) => r.status === stockStatusFilter).map((r) => r.id),
+        };
+      }
+    }
+
+    const total = paginated ? await (prisma as any).inventoryCategory.count({ where }) : 0;
+
     const categories = await (prisma as any).inventoryCategory.findMany({
       where,
       orderBy: { name: 'asc' },
-      ...(limit ? { take: limit } : {}),
+      include: { productCategory: true },
+      ...(paginated
+        ? { skip: (page - 1) * pageSize, take: pageSize }
+        : limit
+          ? { take: limit }
+          : {}),
     });
 
     const statsMap = await buildBatchCategoryStats(
@@ -337,10 +496,22 @@ export const listCategories = async (req: AuthRequest, res: Response) => {
       formatCategory(cat, statsMap.get(cat.id)!),
     );
 
+    if (!paginated) {
+      return res.status(200).json({
+        success: true,
+        message: 'Inventory categories retrieved successfully',
+        data,
+      });
+    }
+
     return res.status(200).json({
       success: true,
       message: 'Inventory categories retrieved successfully',
       data,
+      pagination: { page, limit: pageSize, total, pages: Math.ceil(total / pageSize) },
+      // Totals cover every matching product, not just this page — the stat cards
+      // above the table would otherwise only describe page 1.
+      summary,
     });
   } catch (error) {
     console.error('Error listing inventory categories:', error);
@@ -457,6 +628,8 @@ export const createCategory = async (req: AuthRequest, res: Response) => {
 
     const abbrev = data.abbreviation.toUpperCase();
     const identifierLabel = resolveIdentifierLabel(data.identifierType, data.identifierLabel);
+    const trackingMode = data.stockTrackingMode ?? 'SERIALIZED';
+    const quantityTracked = trackingMode === 'QUANTITY';
 
     const category = await (prisma as any).inventoryCategory.create({
       data: {
@@ -465,6 +638,10 @@ export const createCategory = async (req: AuthRequest, res: Response) => {
         sku: abbrev,
         abbreviation: abbrev,
         type: (data.type ?? 'STOCK') as any,
+        stockTrackingMode: trackingMode as any,
+        barcode: data.barcode || null,
+        productCategoryId: data.productCategoryId || null,
+        unit: data.unit || null,
         description: data.description ?? null,
         supplier: data.supplier ?? null,
         costPrice: (data.costPrice ?? 0) as any,
@@ -481,10 +658,30 @@ export const createCategory = async (req: AuthRequest, res: Response) => {
       },
     });
 
-    // Create a PURCHASE invoice so finance can approve it before units are added
+    // Quantity-tracked products have no units to authorise, so no purchase invoice
+    // is raised. The opening stock is applied here instead, and its cost is booked
+    // straight away unless the user said they already owned it.
     let invoice = null;
     const submittedBy = req.user?.id;
-    if (submittedBy) {
+
+    if (quantityTracked) {
+      const openingQty = data.quantityOnHand ?? data.plannedQty ?? 0;
+      if (openingQty > 0) {
+        await prisma.$transaction(async (tx) => {
+          await addQuantityStock({
+            tx,
+            tenantId,
+            categoryId: category.id,
+            quantityAdded: openingQty,
+            costPrice: Number(data.costPrice ?? 0),
+            isNewPurchase: data.isNewPurchase ?? true,
+            categoryName: category.name,
+          });
+        });
+      }
+    } else if (submittedBy) {
+      // Serialised: raise a PURCHASE invoice so finance can approve it before units
+      // are added. Unchanged from before.
       try {
         invoice = await createPurchaseInvoice({ tenantId, categoryId: category.id, submittedBy });
       } catch (err) {
@@ -579,6 +776,12 @@ export const updateCategory = async (req: AuthRequest, res: Response) => {
         name: data.name ?? undefined,
         sku: nextAbbrev,
         abbreviation: nextAbbrev,
+        barcode: data.barcode !== undefined ? (data.barcode || null) : undefined,
+        hasUniquePerUnitBarcode:
+          data.hasUniquePerUnitBarcode !== undefined ? data.hasUniquePerUnitBarcode : undefined,
+        productCategoryId:
+          data.productCategoryId !== undefined ? (data.productCategoryId || null) : undefined,
+        unit: data.unit !== undefined ? (data.unit || null) : undefined,
         description: data.description !== undefined ? data.description : undefined,
         supplier: data.supplier !== undefined ? data.supplier : undefined,
         costPrice: data.costPrice !== undefined ? (data.costPrice as any) : undefined,
@@ -710,7 +913,7 @@ export const checkCategoryAvailability = async (req: AuthRequest, res: Response)
       return res.status(404).json({ success: false, message: 'Category not found' });
     }
 
-    const [available, items] = await Promise.all([
+    const [availableUnits, items] = await Promise.all([
       (prisma as any).productItem.count({
         where: { tenantId, categoryId: req.params.id, [statusField(category.type ?? 'STOCK')]: 'AVAILABLE' },
       }),
@@ -720,6 +923,10 @@ export const checkCategoryAvailability = async (req: AuthRequest, res: Response)
         take: requested,
       }),
     ]);
+
+    // Quantity-tracked products can fulfil from the count alone; there are no
+    // individual units to hand back.
+    const available = getAvailableStock(category, availableUnits);
 
     return res.json({
       success: true,
@@ -772,8 +979,12 @@ export const createProductItem = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ success: false, message: 'Category not found' });
     }
 
+    // Tenants that do not run stock purchases through finance skip both guards
+    // below. Absent setting resolves to true, so existing tenants are unaffected.
+    const requiresApproval = await stockApprovalRequired(tenantId);
+
     // Guard: invoice must be approved before any units can be added
-    if (!category.invoiceApproved) {
+    if (requiresApproval && !category.invoiceApproved) {
       const pendingInvoice = await (prisma as any).invoice.findFirst({
         where: { categoryId, tenantId, type: 'PURCHASE', status: { in: ['PENDING', 'REJECTED'] } },
         orderBy: { createdAt: 'desc' },
@@ -804,7 +1015,7 @@ export const createProductItem = async (req: AuthRequest, res: Response) => {
             where: { categoryId, tenantId, type: 'PURCHASE', status: 'APPROVED' },
             orderBy: { createdAt: 'desc' },
           });
-    if (approvedInvoice) {
+    if (requiresApproval && approvedInvoice) {
       const authorisedQty: number = approvedInvoice.authorisedQty ?? 0;
       const addedQty: number = approvedInvoice.addedQty ?? 0;
       if (addedQty >= authorisedQty) {
@@ -935,6 +1146,10 @@ export const createProductItems = createProductItem;
 // ── restockRequest ─────────────────────────────────────────────────────────────
 
 const RestockRequestSchema = z.object({
+  /** False when recording stock already owned — the count moves, no expense is booked. */
+  isNewPurchase: z.boolean().optional(),
+  /** Device-generated id for a restock recorded offline; makes the retry safe. */
+  offlineId: z.string().optional(),
   quantity: z.coerce.number().int().positive(),
   costPrice: z.coerce.number().nonnegative().optional(),
   plannedDate: z.string().optional(),
@@ -965,7 +1180,54 @@ export const restockRequest = async (req: AuthRequest, res: Response) => {
     const { quantity, costPrice, plannedDate, notes } = parsed.data;
     const effectiveCostPrice = costPrice ?? Number(category.costPrice ?? 0);
 
-    // Update category's plannedQty and optionally costPrice for this restock
+    // Quantity-tracked stock arrives immediately: the count goes up by the amount
+    // restocked (an addition, not a replacement) and the purchase is booked. No
+    // invoice and no approval flag are involved.
+    if (isQuantityTracked(category)) {
+      const invoiceless = await prisma.$transaction(async (tx) => {
+        if (costPrice !== undefined) {
+          await (tx as any).inventoryCategory.update({
+            where: { id: category.id },
+            data: { costPrice: costPrice as any },
+          });
+        }
+        await addQuantityStock({
+          tx,
+          tenantId,
+          categoryId: category.id,
+          quantityAdded: quantity,
+          costPrice: effectiveCostPrice,
+          isNewPurchase: parsed.data.isNewPurchase ?? true,
+          categoryName: category.name,
+          note: notes,
+          offlineId: parsed.data.offlineId,
+        });
+        return (tx as any).inventoryCategory.findUnique({ where: { id: category.id } });
+      });
+
+      void logAudit({
+        tenantId,
+        actorType:
+          req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+        actorId: req.user?.id,
+        action: 'RESTOCK_RECORDED',
+        module: 'inventory',
+        entityType: 'InventoryCategory',
+        entityId: category.id,
+        entityLabel: category.name,
+        details: { quantity, costPrice: effectiveCostPrice },
+        ...extractRequestContext(req),
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: `${quantity} unit(s) added to ${category.name}`,
+        data: { category: invoiceless, invoice: null },
+      });
+    }
+
+    // Serialised: unchanged — set the planned quantity and raise a new purchase
+    // invoice that finance must approve before units can be added.
     await (prisma as any).inventoryCategory.update({
       where: { id: category.id },
       data: {

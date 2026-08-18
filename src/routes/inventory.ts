@@ -9,6 +9,16 @@ import { checkInventoryCategoryDependencies, checkProductItemDependencies } from
 import { broadcastToModule } from '../services/notificationService.js';
 import { createMovement } from '../controllers/inventory.controller.js';
 import {
+  listProductCategories,
+  createProductCategory,
+  listProductNames,
+  bulkImportProducts,
+} from '../controllers/inventory.bulkImport.controller.js';
+import {
+  bulkCheckCategories,
+  bulkDeleteCategories,
+} from '../controllers/inventory.bulkDelete.controller.js';
+import {
   listCategories,
   getCategoryById,
   createCategory,
@@ -681,6 +691,21 @@ router.get('/categories', permissionGuard('inventory', 'canRead'), listCategorie
 
 /**
  * @openapi
+ * /api/v1/inventory/categories/names:
+ *   get:
+ *     summary: Names of every product, for duplicate checks during import
+ *     tags: [Inventory — Categories]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Array of { id, name }
+ */
+// Must stay above /categories/:id, or "names" is read as an id.
+router.get('/categories/names', permissionGuard('inventory', 'canRead'), listProductNames);
+
+/**
+ * @openapi
  * /api/v1/inventory/categories/{id}:
  *   get:
  *     summary: Get a single category with its serialised items
@@ -807,6 +832,74 @@ router.patch('/categories/:id', permissionGuard('inventory', 'canUpdate'), updat
  *       404:
  *         description: Category not found
  */
+/**
+ * @openapi
+ * /api/v1/inventory/categories/bulk-can-delete:
+ *   post:
+ *     summary: Check many products for blocking dependencies before a bulk delete
+ *     description: >
+ *       Returns which of the selected products can be deleted and, for the rest,
+ *       what is holding each one back (sales, price lists, serialised units,
+ *       project usage, purchase invoices or customer purchase history).
+ *     tags: [Inventory — Categories]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [ids]
+ *             properties:
+ *               ids:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *     responses:
+ *       200:
+ *         description: Deletable and blocked lists
+ */
+router.post(
+  '/categories/bulk-can-delete',
+  permissionGuard('inventory', 'canDelete'),
+  bulkCheckCategories,
+);
+
+/**
+ * @openapi
+ * /api/v1/inventory/categories/bulk-delete:
+ *   post:
+ *     summary: Delete several products at once, skipping any that are still in use
+ *     description: >
+ *       Products with sales, price-list rules, serialised units, customer purchase
+ *       history, open purchase invoices or project usage are left untouched and
+ *       returned in `blocked` with the reason.
+ *     tags: [Inventory — Categories]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [ids]
+ *             properties:
+ *               ids:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *     responses:
+ *       200:
+ *         description: Count deleted plus the blocked list
+ */
+router.post(
+  '/categories/bulk-delete',
+  permissionGuard('inventory', 'canDelete'),
+  bulkDeleteCategories,
+);
+
 router.get('/categories/:id/can-delete', permissionGuard('inventory', 'canDelete'), async (req: AuthRequest, res: Response) => {
   try {
     const report = await checkInventoryCategoryDependencies(req.params.id, req.tenantId!);
@@ -1115,5 +1208,100 @@ router.get('/items/:id/maintenance', permissionGuard('inventory', 'canRead'), ge
  *         description: Movement recorded
  */
 router.post('/movements', permissionGuard('inventory', 'canCreate'), createMovement);
+
+// ── Bulk product import ──────────────────────────────────────────────────────
+
+/**
+ * @openapi
+ * /api/v1/inventory/product-categories:
+ *   get:
+ *     summary: List product categories used to group Retail & Wholesale products
+ *     tags: [Inventory — Products]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Array of categories with product counts
+ *   post:
+ *     summary: Create a product category (never created implicitly)
+ *     tags: [Inventory — Products]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Category created
+ *       200:
+ *         description: A category with the same name (ignoring case) already existed
+ */
+router.get('/product-categories', permissionGuard('inventory', 'canRead'), listProductCategories);
+router.post('/product-categories', permissionGuard('inventory', 'canCreate'), createProductCategory);
+
+/**
+ * @openapi
+ * /api/v1/inventory/bulk-import:
+ *   post:
+ *     summary: Create many products (and any new categories) in a single transaction
+ *     description: >
+ *       Rows are reviewed and corrected in the browser first; this endpoint only
+ *       commits the finished batch. Either every row is created or none is.
+ *     tags: [Inventory — Products]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [products]
+ *             properties:
+ *               products:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [row, name, sellingPrice]
+ *                   properties:
+ *                     row:
+ *                       type: integer
+ *                       description: Original CSV row number, echoed back in errors
+ *                     name:
+ *                       type: string
+ *                     categoryId:
+ *                       type: string
+ *                       description: Existing product category
+ *                     newCategoryName:
+ *                       type: string
+ *                       description: Category to create as part of this batch
+ *                     costPrice:
+ *                       type: number
+ *                     sellingPrice:
+ *                       type: number
+ *                     quantity:
+ *                       type: integer
+ *                     unit:
+ *                       type: string
+ *                     barcode:
+ *                       type: string
+ *                     reorderThreshold:
+ *                       type: integer
+ *                     imageUrl:
+ *                       type: string
+ *     responses:
+ *       201:
+ *         description: All products created
+ *       400:
+ *         description: Row-level validation failed; nothing was saved
+ */
+router.post('/bulk-import', permissionGuard('inventory', 'canCreate'), bulkImportProducts);
 
 export default router;
