@@ -11,6 +11,47 @@ import { stockApprovalRequired } from '../lib/tenantSettings.js';
 import { addQuantityStock } from '../services/quantityStockService.js';
 import { logAudit, extractRequestContext, buildDiff, AuditActorType } from '../services/auditService.js';
 
+/**
+ * True when Prisma rejected a write for violating a unique constraint that
+ * involves `column`.
+ *
+ * Prisma signals this as code P2002. Reading the code is stable; matching the
+ * human-readable message is not — "Unique constraint failed on the fields:
+ * (`tenant_id`, `sku`)" names the columns rather than the index and capitalises
+ * differently than you would guess, which is what let every duplicate
+ * abbreviation surface as a 500 instead of the 409 meant for it.
+ */
+function isUniqueViolationOn(error: unknown, column: string): boolean {
+  const e = error as any;
+  if (e?.code !== 'P2002') return false;
+
+  // Where the offending columns live depends on how the client reached the
+  // database. Classic Prisma puts them in meta.target; under a driver adapter
+  // (Prisma 7, which is what we run) they are nested in the underlying driver
+  // error instead, and meta.target is absent entirely.
+  const adapterCause = e.meta?.driverAdapterError?.cause;
+  const raw = e.meta?.target ?? adapterCause?.constraint?.fields;
+  const columns = Array.isArray(raw) ? raw.map(String) : raw ? [String(raw)] : [];
+
+  const needle = column.toLowerCase();
+  if (columns.some((c) => c.toLowerCase().includes(needle))) return true;
+
+  // Last resort: the driver's own message names the constraint.
+  return String(adapterCause?.originalMessage ?? '').toLowerCase().includes(needle);
+}
+
+/**
+ * A ProductItem carries exactly one of these, depending on its category type.
+ * They overlap but are not identical: SOLD and DEPLOYED are stock-only, IN_USE
+ * is inventory-only.
+ */
+const STOCK_ITEM_STATUSES = new Set([
+  'AVAILABLE', 'DEPLOYED', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD', 'SOLD',
+]);
+const INVENTORY_ITEM_STATUSES = new Set([
+  'AVAILABLE', 'IN_USE', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD',
+]);
+
 // ── Shared helpers ─────────────────────────────────────────────────────────────
 
 export const fetchCategoryById = (tenantId: string, id: string) =>
@@ -686,6 +727,10 @@ export const createCategory = async (req: AuthRequest, res: Response) => {
             categoryName: category.name,
           });
         });
+        // `category` was read before the stock was applied, so it still says 0.
+        // Returning that made a product with opening stock look empty until the
+        // next refetch.
+        category.quantityOnHand = openingQty;
       }
     } else if (submittedBy && (await stockApprovalRequired(tenantId))) {
       // Serialised, and this tenant puts stock purchases in front of finance.
@@ -734,13 +779,33 @@ export const createCategory = async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('Error creating inventory category:', error);
     const msg = error instanceof Error ? error.message : '';
-    if (
-      msg.includes('inventory_categories_tenant_id_sku_key') ||
-      (msg.includes('unique') && msg.toLowerCase().includes('sku'))
-    ) {
+    // Matched on the error code, not the message. The previous text match looked
+    // for a lowercase 'unique' and the index name, but Prisma writes "Unique
+    // constraint failed on the fields: (`tenant_id`, `sku`)" — so every duplicate
+    // abbreviation fell through to a 500 instead of the 409 meant for it.
+    if (isUniqueViolationOn(error, 'sku')) {
       return res.status(409).json({
         success: false,
         message: 'A category with this abbreviation already exists. Please use a different abbreviation.',
+      });
+    }
+    // A barcode identifies a product, so a collision means this product already
+    // exists and the user wants to add stock to it, not create a second one.
+    // Naming the owner is the whole answer — without it this surfaced as a bare
+    // 500 and looked like the page was broken.
+    if (isUniqueViolationOn(error, 'barcode')) {
+      const owner = await (prisma as any).inventoryCategory
+        .findFirst({
+          where: { tenantId: req.tenantId!, barcode: req.body?.barcode },
+          select: { id: true, name: true, abbreviation: true },
+        })
+        .catch(() => null);
+      return res.status(409).json({
+        success: false,
+        message: owner
+          ? `Barcode ${req.body?.barcode} already belongs to "${owner.name}" (${owner.abbreviation}). To add more of it, use "Add stock to an existing product" instead.`
+          : 'This barcode is already used by another product. Use a different barcode, or add stock to the existing product instead.',
+        data: owner ? { existingCategoryId: owner.id, existingCategoryName: owner.name } : undefined,
       });
     }
     return res.status(500).json({
@@ -1298,28 +1363,45 @@ export const listProductItems = async (req: AuthRequest, res: Response) => {
     const status = req.query.status ? String(req.query.status) : undefined;
     const search = req.query.search ? String(req.query.search) : undefined;
     const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
-    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 20;
+    // Capped rather than trusted: without categoryId this can span the whole
+    // tenant, and the offline catalog legitimately asks for thousands at once.
+    const MAX_LIMIT = 5000;
+    const requested = req.query.limit ? parseInt(req.query.limit as string, 10) : 20;
+    const limit = Math.min(Math.max(Number.isFinite(requested) ? requested : 20, 1), MAX_LIMIT);
     const skip = (page - 1) * limit;
 
-    if (!categoryId) {
-      return res.status(400).json({ success: false, message: 'categoryId query param is required' });
-    }
+    // categoryId is optional. Requiring it meant the offline catalog sync, which
+    // wants every available unit in the tenant, got a 400 on every attempt — and
+    // because it swallows failures, the unit cache was silently always empty.
+    const where: any = { tenantId };
+    if (categoryId) where.categoryId = categoryId;
 
-    const where: any = { tenantId, categoryId };
+    // Each clause goes in its own AND entry. Assigning both to `where.OR` meant a
+    // search silently discarded the status filter.
+    const and: any[] = [];
     if (status) {
-      // Status may be in either column depending on category type — search both
-      where.OR = [
-        { stockStatus: status },
-        { inventoryStatus: status },
-      ];
+      // Status lives in whichever column suits the category type, so both are
+      // searched — but only for the enums that actually declare the value.
+      // Postgres rejects an unknown enum member outright, so asking
+      // inventoryStatus for 'SOLD' threw and surfaced as a 500.
+      const statusOr: any[] = [];
+      if (STOCK_ITEM_STATUSES.has(status)) statusOr.push({ stockStatus: status });
+      if (INVENTORY_ITEM_STATUSES.has(status)) statusOr.push({ inventoryStatus: status });
+      if (!statusOr.length) {
+        return res.status(400).json({ success: false, message: `Unknown status "${status}"` });
+      }
+      and.push({ OR: statusOr });
     }
     if (search) {
-      where.OR = [
-        { systemId: { contains: search, mode: 'insensitive' } },
-        { userIdentifier: { contains: search, mode: 'insensitive' } },
-        { name: { contains: search, mode: 'insensitive' } },
-      ];
+      and.push({
+        OR: [
+          { systemId: { contains: search, mode: 'insensitive' } },
+          { userIdentifier: { contains: search, mode: 'insensitive' } },
+          { name: { contains: search, mode: 'insensitive' } },
+        ],
+      });
     }
+    if (and.length) where.AND = and;
 
     const [items, total] = await Promise.all([
       (prisma as any).productItem.findMany({ where, orderBy: { createdAt: 'desc' }, skip, take: limit }),
