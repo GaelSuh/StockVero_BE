@@ -122,7 +122,15 @@ export const CategorySchema = z.object({
   barcode: z.string().max(64).optional().or(z.literal('')),
   productCategoryId: z.string().optional().or(z.literal('')),
   unit: z.string().max(24).optional().or(z.literal('')),
-  stockTrackingMode: z.enum(['SERIALIZED', 'QUANTITY']).optional(),
+  /**
+   * Required on create. Left optional it silently resolved to SERIALIZED, which
+   * gave quantity products per-unit tracking nobody chose and no way back —
+   * the mode is fixed once units and stock logs exist against it.
+   * `CategorySchema.partial()` on update keeps this optional there.
+   */
+  stockTrackingMode: z.enum(['SERIALIZED', 'QUANTITY'], {
+    error: 'Choose how this product is counted',
+  }),
   /** Set the first time stock is received by scanning; remembered thereafter. */
   hasUniquePerUnitBarcode: z.boolean().optional(),
   quantityOnHand: z.coerce.number().int().nonnegative().optional(),
@@ -628,7 +636,7 @@ export const createCategory = async (req: AuthRequest, res: Response) => {
 
     const abbrev = data.abbreviation.toUpperCase();
     const identifierLabel = resolveIdentifierLabel(data.identifierType, data.identifierLabel);
-    const trackingMode = data.stockTrackingMode ?? 'SERIALIZED';
+    const trackingMode = data.stockTrackingMode;
     const quantityTracked = trackingMode === 'QUANTITY';
 
     const category = await (prisma as any).inventoryCategory.create({
@@ -679,9 +687,10 @@ export const createCategory = async (req: AuthRequest, res: Response) => {
           });
         });
       }
-    } else if (submittedBy) {
-      // Serialised: raise a PURCHASE invoice so finance can approve it before units
-      // are added. Unchanged from before.
+    } else if (submittedBy && (await stockApprovalRequired(tenantId))) {
+      // Serialised, and this tenant puts stock purchases in front of finance.
+      // With the toggle off there is nothing to approve, so raising an invoice
+      // would only leave PENDING paperwork nobody ever actions.
       try {
         invoice = await createPurchaseInvoice({ tenantId, categoryId: category.id, submittedBy });
       } catch (err) {
@@ -1228,20 +1237,26 @@ export const restockRequest = async (req: AuthRequest, res: Response) => {
 
     // Serialised: unchanged — set the planned quantity and raise a new purchase
     // invoice that finance must approve before units can be added.
+    const needsApproval = await stockApprovalRequired(tenantId);
+
     await (prisma as any).inventoryCategory.update({
       where: { id: category.id },
       data: {
         plannedQty: quantity,
         plannedDate: plannedDate ? new Date(plannedDate) : undefined,
         costPrice: costPrice !== undefined ? (costPrice as any) : undefined,
-        invoiceApproved: false, // must re-approve for new batch
+        // Only reset the flag where it gates anything; otherwise it would sit
+        // false forever and mean nothing.
+        invoiceApproved: needsApproval ? false : undefined,
       },
     });
 
     const { createPurchaseInvoice: createInvoice } = await import('../services/invoiceService.js');
-    const invoice = await createInvoice({ tenantId, categoryId: category.id, submittedBy });
+    const invoice = needsApproval
+      ? await createInvoice({ tenantId, categoryId: category.id, submittedBy })
+      : null;
 
-    if (notes) {
+    if (notes && invoice) {
       await (prisma as any).invoice.update({
         where: { id: invoice.id },
         data: { notes },

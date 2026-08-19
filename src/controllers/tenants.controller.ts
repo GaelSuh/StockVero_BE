@@ -5,6 +5,7 @@ import { AuthRequest } from '../types/index.js';
 import { resolveSignedUrl, deleteStoredFile } from '../lib/storage.js';
 import { broadcastToModule } from '../services/notificationService.js';
 import { logAudit, extractRequestContext, AuditActorType } from '../services/auditService.js';
+import { readTenantSettings } from '../lib/tenantSettings.js';
 
 const UpdateModuleSchema = z.object({
   isEnabled: z.boolean(),
@@ -46,6 +47,8 @@ const UpdateTenantMeSchema = z.object({
   industry: z.string().optional(),
   website: z.string().optional(),
   logoUrl: z.string().nullable().optional(),
+  /** Owner-controlled: put stock purchases in front of finance before units land. */
+  stockApprovalRequired: z.boolean().optional(),
 });
 
 export const updateMyTenant = async (req: AuthRequest, res: Response) => {
@@ -58,8 +61,21 @@ export const updateMyTenant = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const { name, industry, website, logoUrl } = parsed.data;
+    const { name, industry, website, logoUrl, stockApprovalRequired } = parsed.data;
     const updates: Record<string, any> = {};
+
+    // Merged rather than replaced — settingsConfig is a shared bag and other
+    // keys will land in it later.
+    if (stockApprovalRequired !== undefined) {
+      const current = await prisma.tenant.findUnique({
+        where: { id: req.tenantId! },
+        select: { settingsConfig: true },
+      });
+      updates.settingsConfig = {
+        ...(readTenantSettings(current) as Record<string, unknown>),
+        stockApprovalRequired,
+      };
+    }
     if (name !== undefined) updates.name = name;
     if (industry !== undefined) updates.industry = industry || null;
     if (website !== undefined) updates.website = website || null;
@@ -78,7 +94,7 @@ export const updateMyTenant = async (req: AuthRequest, res: Response) => {
     const updated = await prisma.tenant.update({
       where: { id: req.tenantId! },
       data: updates,
-      select: { id: true, name: true, industry: true, website: true, logoUrl: true },
+      select: { id: true, name: true, industry: true, website: true, logoUrl: true, settingsConfig: true },
     });
 
     // Notify authorized users

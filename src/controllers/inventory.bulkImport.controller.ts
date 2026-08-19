@@ -6,6 +6,7 @@ import { broadcastToModule } from '../services/notificationService.js';
 import { logAudit, extractRequestContext, AuditActorType } from '../services/auditService.js';
 import { addQuantityStock } from '../services/quantityStockService.js';
 import { InsufficientFundsError } from '../services/balanceService.js';
+import { stockApprovalRequired } from '../lib/tenantSettings.js';
 import { createPurchaseInvoice } from '../services/invoiceService.js';
 
 // ── Category name normalisation ────────────────────────────────────────────────
@@ -466,7 +467,7 @@ export const bulkImportProducts = async (req: AuthRequest, res: Response) => {
 
     // Serialised imports still go through finance: one purchase invoice per product,
     // raised after the batch commits so a finance hiccup cannot roll back the import.
-    if (serializedIds.length > 0 && req.user?.id) {
+    if (serializedIds.length > 0 && req.user?.id && (await stockApprovalRequired(tenantId))) {
       for (const categoryId of serializedIds) {
         try {
           await createPurchaseInvoice({ tenantId, categoryId, submittedBy: req.user.id });

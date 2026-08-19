@@ -1,5 +1,5 @@
 import { prisma } from '../db.js';
-import { checkSufficientFunds, recordIncome, recordExpense } from './balanceService.js';
+import { checkSufficientFunds, recordIncome, applyExpense } from './balanceService.js';
 
 // ── Invoice number generator ───────────────────────────────────────────────────
 
@@ -382,7 +382,11 @@ export async function deductUnitCost(
   const costAmount = Number(category.costPrice ?? 0);
 
   await prisma.$transaction(async (tx) => {
-    await recordExpense(tenantId, costAmount, tx);
+    // applyExpense, not recordExpense: a unit that has arrived was already paid
+    // for. Refusing to write it down because the recorded balance is short would
+    // just stop the ledger ever catching up. recordExpense keeps its blocking
+    // behaviour for project spend, which is an authorisation, not a record.
+    await applyExpense(tenantId, costAmount, tx);
 
     await (tx as any).transaction.create({
       data: {

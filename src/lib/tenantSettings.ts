@@ -7,8 +7,9 @@ import { prisma } from '../db.js';
 export interface TenantSettings {
   /**
    * Finance must approve a purchase invoice before serialised units can be added.
-   * Absent means true — every tenant that existed before this setting keeps the
-   * original Installation behaviour untouched.
+   * Absent means false: recording that stock arrived is not a spending decision.
+   * Tenants that want the discipline turn it on in Settings, and every tenant
+   * that relied on it before this default changed was backfilled explicitly.
    */
   stockApprovalRequired?: boolean;
 }
@@ -19,7 +20,7 @@ export const readTenantSettings = (tenant: { settingsConfig?: unknown } | null):
 };
 
 export const isStockApprovalRequired = (tenant: { settingsConfig?: unknown } | null): boolean =>
-  readTenantSettings(tenant).stockApprovalRequired ?? true;
+  readTenantSettings(tenant).stockApprovalRequired ?? false;
 
 /** Loads just the settings for a tenant. */
 export async function getTenantSettings(tenantId: string): Promise<TenantSettings> {
@@ -31,7 +32,7 @@ export async function getTenantSettings(tenantId: string): Promise<TenantSetting
 }
 
 export async function stockApprovalRequired(tenantId: string): Promise<boolean> {
-  return (await getTenantSettings(tenantId)).stockApprovalRequired ?? true;
+  return (await getTenantSettings(tenantId)).stockApprovalRequired ?? false;
 }
 
 /**
@@ -40,15 +41,11 @@ export async function stockApprovalRequired(tenantId: string): Promise<boolean> 
  * manufacturing keep the approval step, and anything unrecognised errs on the
  * safe side by keeping it too.
  */
-export function defaultStockApprovalRequired(organizationType?: string | null): boolean {
-  switch (organizationType) {
-    case 'RETAIL_SHOP':
-    case 'WHOLESALE_DISTRIBUTION':
-      return false;
-    // MANUFACTURING, SERVICE_INSTALLATION and anything unset keep the approval step.
-    default:
-      return true;
-  }
+export function defaultStockApprovalRequired(_organizationType?: string | null): boolean {
+  // Off for everyone now. Recording stock that has arrived is a statement of
+  // fact, not a request to spend; the tenants that want finance in front of it
+  // switch it on deliberately.
+  return false;
 }
 
 /**
@@ -63,13 +60,6 @@ export function defaultSettingsForSignup(params: {
   organizationType?: string | null;
   selectedModules: string[];
 }): TenantSettings {
-  if (params.organizationType) {
-    return { stockApprovalRequired: defaultStockApprovalRequired(params.organizationType) };
-  }
-
-  const modules = new Set(params.selectedModules.map((m) => m.toLowerCase()));
-  const sellsOverCounter = modules.has('retail_sales') || modules.has('wholesale_sales');
-  const runsProjects = modules.has('projects');
-
-  return { stockApprovalRequired: !(sellsOverCounter && !runsProjects) };
+  void params;
+  return { stockApprovalRequired: false };
 }
