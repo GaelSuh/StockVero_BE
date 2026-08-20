@@ -59,6 +59,9 @@ export async function recordReturnAsExpense(
     },
   });
 
-  const { recordExpense } = await import('./balanceService.js');
-  await recordExpense(tenantId, amount, tx);
+  // applyExpense, not recordExpense: the money has already left the till.
+  // Refusing to write it down because the recorded balance is short would only
+  // stop the ledger ever catching up.
+  const { applyExpense } = await import('./balanceService.js');
+  await applyExpense(tenantId, amount, tx);
 }

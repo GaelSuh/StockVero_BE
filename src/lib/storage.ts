@@ -2,6 +2,18 @@ import { createClient } from '@supabase/supabase-js';
 
 const supabaseUrl = process.env.SUPABASE_URL || '';
 const supabaseKey = process.env.SUPABASE_KEY || '';
+/**
+ * Supabase storage bucket.
+ *
+ * Still named solarflow-files, deliberately. The bucket name is baked into every
+ * URL already written to the database — product images, documents, avatars and
+ * tenant logos all point at /storage/v1/object/public/solarflow-files/... — so
+ * changing this default alone would 404 all of them.
+ *
+ * Renaming it for real means: create stockvero-files in Supabase, copy the
+ * objects across, rewrite the stored URLs, then set SUPABASE_STORAGE_BUCKET.
+ * The env var already overrides this, so no code change is needed for that.
+ */
 export const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'solarflow-files';
 
 export const supabase =

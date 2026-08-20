@@ -373,6 +373,16 @@ model InventoryCategory {
   /// unit shares one product barcode (most solar panels). Null means nobody has
   /// said yet — receiving stock asks once, then remembers.
   hasUniquePerUnitBarcode Boolean?     @map("has_unique_per_unit_barcode")
+
+  /// Which sales channels this product may be sold through.
+  ///
+  /// Two independent booleans rather than one exclusive `type`, because a product
+  /// is often sold both ways from the *same* stock — rice by the bag at retail and
+  /// by the pallet wholesale. Splitting it into separate per-channel product rows
+  /// would recreate the two-disconnected-stock-numbers problem already fixed by
+  /// getAvailableStock(). At least one must be true.
+  retailEnabled    Boolean @default(true) @map("retail_enabled")
+  wholesaleEnabled Boolean @default(true) @map("wholesale_enabled")
   /// Live on-hand count for QUANTITY products. Distinct from plannedQty, which
   /// keeps its original meaning: the purchase quantity authorised on an invoice.
   quantityOnHand    Int                @default(0) @map("quantity_on_hand")
@@ -1211,6 +1221,11 @@ model Sale {
   deliveryNotes   String?         @map("delivery_notes_text")
   minimumOrderMet Boolean?        @map("minimum_order_met")
 
+  /// What the customer left as security against a credit sale, if anything.
+  /// Free text — a shop takes an ID card, a phone, a tool; there is no useful
+  /// enum for it. Kept separate from `notes` so it can actually be looked up.
+  creditCollateral String? @map("credit_collateral")
+
   offlineId      String?   @unique @map("offline_id")
   createdOffline Boolean   @default(false) @map("created_offline")
   syncedAt       DateTime? @map("synced_at")
@@ -1297,6 +1312,12 @@ model SaleReturn {
 
   processedById   String @map("processed_by_id")
   processedByName String @map("processed_by_name")
+
+  /// For an EXCHANGE: the sale raised for the replacement goods going out.
+  /// The replacement flows through the normal sale path so it deducts stock,
+  /// records income and appears in reports like any other sale; this is the
+  /// thread back to the return that caused it.
+  exchangeSaleId String? @map("exchange_sale_id")
 
   createdAt DateTime @default(now()) @map("created_at")
 

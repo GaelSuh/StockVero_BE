@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { tenantGuard, mustChangePasswordGuard } from '../middleware/auth.js';
-import { createReturn, listReturns, getReturn } from '../controllers/returns.controller.js';
+import { createReturn, listReturns, getReturn, getReturnsAnalytics } from '../controllers/returns.controller.js';
 import { AuthRequest } from '../types/index.js';
 import { Response, NextFunction } from 'express';
 
@@ -28,6 +28,7 @@ function salesPermissionGuard(action: 'canCreate' | 'canRead') {
 
 router.post('/', salesPermissionGuard('canCreate'), createReturn);
 router.get('/', salesPermissionGuard('canRead'), listReturns);
+router.get('/analytics', salesPermissionGuard('canRead'), getReturnsAnalytics);
 router.get('/:id', salesPermissionGuard('canRead'), getReturn);
 
 export default router;

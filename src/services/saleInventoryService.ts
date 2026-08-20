@@ -88,6 +88,25 @@ export async function deductStockForSale(
     if (quantityTracked) category.quantityOnHand = settled;
     else category.plannedQty = settled;
 
+    // Serialised stock is *read* as the count of AVAILABLE unit rows, so a sale
+    // that only moved plannedQty left the available count untouched — the same
+    // phone stayed sellable for ever. Consume the oldest available units, which
+    // is also what the scan-to-cart picker assumes.
+    if (!quantityTracked) {
+      const consumed = await (tx as any).productItem.findMany({
+        where: { tenantId, categoryId: item.categoryId, stockStatus: 'AVAILABLE' },
+        orderBy: { createdAt: 'asc' },
+        take: item.quantity,
+        select: { id: true },
+      });
+      if (consumed.length > 0) {
+        await (tx as any).productItem.updateMany({
+          where: { id: { in: consumed.map((u: any) => u.id) } },
+          data: { stockStatus: 'SOLD' },
+        });
+      }
+    }
+
     logs.push({
       tenantId,
       categoryId: item.categoryId,
@@ -165,6 +184,24 @@ export async function restoreStockForReturn(
       where: { id: item.categoryId },
       data: quantityTracked ? { quantityOnHand: newStock } : { plannedQty: newStock },
     });
+
+    // Mirror of the sale: put units back on the shelf so the available count
+    // actually rises. Most recently sold first, which is the one most likely to
+    // be the item walking back through the door.
+    if (!quantityTracked) {
+      const returned = await (tx as any).productItem.findMany({
+        where: { tenantId, categoryId: item.categoryId, stockStatus: 'SOLD' },
+        orderBy: { updatedAt: 'desc' },
+        take: item.quantity,
+        select: { id: true },
+      });
+      if (returned.length > 0) {
+        await (tx as any).productItem.updateMany({
+          where: { id: { in: returned.map((u: any) => u.id) } },
+          data: { stockStatus: 'AVAILABLE' },
+        });
+      }
+    }
 
     await (tx as any).categoryStockLog.create({
       data: {

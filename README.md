@@ -1,6 +1,6 @@
-# SolarFlow Pro Backend API
+# StockVero Backend API
 
-Node.js + Express + PostgreSQL + TypeScript backend for the SolarFlow Pro multi-tenant SaaS platform.
+Node.js + Express + PostgreSQL + TypeScript backend for the StockVero multi-tenant SaaS platform.
 
 ## Quick Start
 
@@ -245,4 +245,4 @@ See `BACKEND_IMPLEMENTATION.md` for full architecture documentation.
 
 ---
 
-Built with ❤️ for the SolarFlow Pro platform.
+Built with ❤️ for the StockVero platform.

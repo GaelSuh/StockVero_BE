@@ -5,7 +5,17 @@ import { AuthRequest } from '../types/index.js';
 import { getNextSaleNumber } from '../services/saleService.js';
 import { recordSaleAsIncome } from '../services/saleFinanceService.js';
 import { deductStockForSale, validateStockAvailability } from '../services/saleInventoryService.js';
-import { resolvePrice } from '../services/priceResolutionService.js';
+import { resolvePrice, resolvePriceDetailed } from '../services/priceResolutionService.js';
+import { findOrCreateCreditCustomer } from '../services/creditCustomerService.js';
+
+/**
+ * Mirrors `enum SalePaymentMethod` in schema.prisma. The frontend keeps the same
+ * list in src/lib/paymentMethods.ts — they must be changed together.
+ */
+const SALE_PAYMENT_METHODS = ['CASH', 'MTN_MOMO', 'ORANGE_MONEY', 'CARD', 'BANK_TRANSFER', 'OTHER'] as const;
+
+/** Not a payment: marks the unpaid remainder, never stored as a SalePayment row. */
+const CREDIT_MARKER = 'CREDIT';
 
 export async function createSale(req: AuthRequest, res: Response) {
   try {
@@ -14,6 +24,7 @@ export async function createSale(req: AuthRequest, res: Response) {
     const {
       mode,
       customerId,
+      creditContact,
       customerName,
       items,
       payments,
@@ -28,6 +39,31 @@ export async function createSale(req: AuthRequest, res: Response) {
     }
     if (!mode || !['RETAIL', 'WHOLESALE'].includes(mode)) {
       return res.status(400).json({ success: false, message: 'Invalid sale mode' });
+    }
+
+    // Wholesale is sold to a known business, not over a counter: the customer
+    // decides the price list, the credit terms and who owes what. Accepting an
+    // anonymous wholesale sale silently priced it at retail rates.
+    if (mode === 'WHOLESALE' && !customerId) {
+      return res.status(400).json({
+        success: false,
+        message: 'A customer is required for wholesale sales.',
+      });
+    }
+
+    // Checked here rather than left to Prisma: an unknown enum member aborts the
+    // transaction with a validation error that reaches the till as a bare 500,
+    // which is how "MOBILE_MONEY" and "CREDIT" both went unnoticed.
+    const badMethod = (payments ?? []).find(
+      (p: any) =>
+        String(p?.method).toUpperCase() !== CREDIT_MARKER &&
+        !SALE_PAYMENT_METHODS.includes(String(p?.method).toUpperCase() as any),
+    );
+    if (badMethod) {
+      return res.status(400).json({
+        success: false,
+        message: `Unknown payment method "${badMethod.method}". Expected one of: ${SALE_PAYMENT_METHODS.join(', ')} or ${CREDIT_MARKER}.`,
+      });
     }
 
     // One read for the whole cart. Quantities are summed per product first, so a
@@ -120,13 +156,39 @@ export async function createSale(req: AuthRequest, res: Response) {
         : (discountValue || 0);
       const totalAmount = subtotal - saleDiscountAmount;
 
-      const totalPaid = payments?.reduce((sum: number, p: any) => sum + p.amount, 0) || 0;
+      // CREDIT is not a way of paying, it is the absence of payment, and there is
+      // no such member of SalePaymentMethod. The till sends it as a marker for
+      // "the customer is taking this away without settling"; it must not become a
+      // SalePayment row, and counting it as money made a wholly unpaid sale come
+      // out as paymentStatus PAID owing nothing.
+      const settledPayments = (payments ?? []).filter(
+        (p: any) => String(p.method).toUpperCase() !== CREDIT_MARKER,
+      );
+
+      const totalPaid = settledPayments.reduce((sum: number, p: any) => sum + p.amount, 0);
       const amountOwed = Math.max(0, totalAmount - totalPaid);
       let paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT' = 'PAID';
       if (totalPaid <= 0) paymentStatus = 'CREDIT';
       else if (amountOwed > 0) paymentStatus = 'PARTIAL';
 
-      const resolvedCustomerName = customerName || (customerId ? undefined : 'Walk-in Customer');
+      // A retail credit sale needs somebody to chase. Rather than sending the
+      // cashier to a registration screen mid-sale, the counter captures a phone
+      // and that becomes a real customer row — matched to an existing one when
+      // the same number comes back.
+      let effectiveCustomerId: string | null = customerId || null;
+      let creditCustomerName: string | null = null;
+
+      if (mode === 'RETAIL' && !effectiveCustomerId && creditContact?.phone) {
+        const credit = await findOrCreateCreditCustomer(tx, tenantId, {
+          phone: String(creditContact.phone),
+          name: customerName,
+        });
+        effectiveCustomerId = credit.id;
+        creditCustomerName = credit.name;
+      }
+
+      const resolvedCustomerName =
+        customerName || creditCustomerName || (effectiveCustomerId ? undefined : 'Walk-in Customer');
 
       const createdSale = await tx.sale.create({
         data: {
@@ -135,7 +197,7 @@ export async function createSale(req: AuthRequest, res: Response) {
           offlineId: offlineId ?? null,
           mode,
           status: 'COMPLETED',
-          customerId: customerId || null,
+          customerId: effectiveCustomerId,
           customerName: resolvedCustomerName || null,
           soldById: user.id,
           soldByType: sellerType,
@@ -152,10 +214,11 @@ export async function createSale(req: AuthRequest, res: Response) {
           amountPaid: totalPaid,
           amountOwed,
           creditDueDate: creditDueDate ? new Date(creditDueDate) : null,
+          creditCollateral: creditContact?.collateral?.trim() || null,
           notes: notes || null,
           items: { create: saleItems },
-          payments: payments?.length ? {
-            create: payments.map((p: any) => ({
+          payments: settledPayments.length ? {
+            create: settledPayments.map((p: any) => ({
               method: p.method,
               amount: p.amount,
               reference: p.reference || null,
@@ -449,10 +512,26 @@ export async function getDailySalesSummary(req: AuthRequest, res: Response) {
   try {
     const { getDailySummary } = await import('../services/dailySummaryService.js');
     const date = req.query.date ? new Date(req.query.date as string) : new Date();
-    const mode = req.query.mode as string | undefined || req.baseUrl?.includes('wholesale') ? 'WHOLESALE' : 'RETAIL';
+    if (Number.isNaN(date.getTime())) {
+      return res.status(400).json({ success: false, message: 'Invalid date' });
+    }
+
+    // Both routers mount under the same base, so req.baseUrl never names the
+    // mode — the previous check read it there and always came back false. It
+    // also mixed || with ?:, which binds tighter, so any ?mode= at all meant
+    // WHOLESALE. Between them, the wholesale page was reporting retail figures.
+    const queryMode = String(req.query.mode ?? '').toUpperCase();
+    const mode =
+      queryMode === 'RETAIL' || queryMode === 'WHOLESALE'
+        ? queryMode
+        : req.originalUrl.includes('/wholesale/')
+          ? 'WHOLESALE'
+          : 'RETAIL';
+
     const summary = await getDailySummary(req.tenantId!, date, mode);
     return res.json({ success: true, data: summary });
   } catch (error) {
+    console.error('Error building daily sales summary:', error);
     return res.status(500).json({ success: false, message: 'Failed to get daily summary' });
   }
 }
@@ -477,10 +556,22 @@ export async function resolvePricesController(req: AuthRequest, res: Response) {
     }
 
     const resolved = await Promise.all(
-      items.map(async (item: { categoryId: string; quantity: number }) => ({
-        categoryId: item.categoryId,
-        unitPrice: await resolvePrice(tenantId, item.categoryId, customerId || null, item.quantity || 1),
-      })),
+      items.map(async (item: { categoryId: string; quantity: number }) => {
+        const resolved = await resolvePriceDetailed(
+          tenantId,
+          item.categoryId,
+          customerId || null,
+          item.quantity || 1,
+        );
+        return {
+          categoryId: item.categoryId,
+          unitPrice: resolved.unitPrice,
+          // Lets the cart say *why* a price changed rather than silently
+          // rewriting the number under the cashier.
+          source: resolved.source,
+          priceListName: resolved.priceListName ?? null,
+        };
+      }),
     );
 
     return res.json({ success: true, data: resolved });

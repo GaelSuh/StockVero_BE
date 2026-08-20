@@ -32,7 +32,7 @@ function hr() {
 // ── main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  console.log('\n🔐  SolarFlow Pro — Create Super Admin\n');
+  console.log('\n🔐  StockVero — Create Super Admin\n');
   hr();
 
   const rl = readline.createInterface({ input, output });

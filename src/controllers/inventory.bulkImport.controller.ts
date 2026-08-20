@@ -8,6 +8,7 @@ import { addQuantityStock } from '../services/quantityStockService.js';
 import { InsufficientFundsError } from '../services/balanceService.js';
 import { stockApprovalRequired } from '../lib/tenantSettings.js';
 import { createPurchaseInvoice } from '../services/invoiceService.js';
+import { resolveChannelFlags } from '../lib/channels.js';
 
 // ── Category name normalisation ────────────────────────────────────────────────
 
@@ -46,6 +47,14 @@ const ImportRowSchema = z.object({
   barcode: z.preprocess(emptyToNull, z.string().trim().max(64).nullable().optional()),
   reorderThreshold: z.coerce.number().int().nonnegative().default(0),
   imageUrl: z.preprocess(emptyToNull, z.string().url().nullable().optional()),
+  /**
+   * Optional per-row channel override: "retail", "wholesale" or "both".
+   * Absent, the row takes the batch default.
+   */
+  channels: z.preprocess(
+    (v) => (typeof v === 'string' ? v.trim().toLowerCase() : v),
+    z.enum(['retail', 'wholesale', 'both']).nullable().optional(),
+  ),
 });
 
 const BulkImportSchema = z.object({
@@ -62,6 +71,12 @@ const BulkImportSchema = z.object({
    * recorded, but no expense is booked — that money left the business before today.
    */
   isNewPurchase: z.boolean().optional(),
+  /**
+   * Batch-level channel default, applied to every row that does not name its
+   * own. Only meaningful for an org running both channels — a single-channel
+   * org has its answer derived and this is ignored.
+   */
+  channels: z.enum(['retail', 'wholesale', 'both']).optional(),
 });
 
 type ImportRow = z.infer<typeof ImportRowSchema>;
@@ -238,6 +253,19 @@ export const bulkImportProducts = async (req: AuthRequest, res: Response) => {
     const rows: ImportRow[] = parsed.data.products;
     const trackingMode = parsed.data.stockTrackingMode ?? 'QUANTITY';
     const isNewPurchase = parsed.data.isNewPurchase ?? true;
+
+    // Channels resolve per row: the row's own value if it named one, else the
+    // batch default. resolveChannelFlags then has the final say, so a
+    // single-channel org still lands on the one channel it actually runs
+    // whatever the spreadsheet claims.
+    const batchChannels = parsed.data.channels ?? 'both';
+    const channelsFor = (row: ImportRow) => {
+      const choice = (row.channels ?? batchChannels) as 'retail' | 'wholesale' | 'both';
+      return resolveChannelFlags(req, {
+        retailEnabled: choice === 'retail' || choice === 'both',
+        wholesaleEnabled: choice === 'wholesale' || choice === 'both',
+      });
+    };
     const serializedIds: string[] = [];
     const errors: RowError[] = [];
 
@@ -407,6 +435,7 @@ export const bulkImportProducts = async (req: AuthRequest, res: Response) => {
               productCategoryId,
               type: 'STOCK',
               stockTrackingMode: trackingMode as any,
+              ...channelsFor(row),
               unit: row.unit ?? null,
               costPrice: row.costPrice as any,
               sellingPrice: row.sellingPrice as any,

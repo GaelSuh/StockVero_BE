@@ -9,6 +9,11 @@ import { deleteStorageFiles } from '../lib/storage.js';
 import { getAvailableStock, isQuantityTracked, resolveStockStatus } from '../lib/stock.js';
 import { stockApprovalRequired } from '../lib/tenantSettings.js';
 import { addQuantityStock } from '../services/quantityStockService.js';
+import {
+  resolveChannelFlags,
+  channelsAreValid,
+  CHANNELS_REQUIRED_MESSAGE,
+} from '../lib/channels.js';
 import { logAudit, extractRequestContext, buildDiff, AuditActorType } from '../services/auditService.js';
 
 /**
@@ -174,6 +179,12 @@ export const CategorySchema = z.object({
   }),
   /** Set the first time stock is received by scanning; remembered thereafter. */
   hasUniquePerUnitBarcode: z.boolean().optional(),
+  /**
+   * Sales channels. Omitted means "both", which is what every product was
+   * implicitly available on before these existed.
+   */
+  retailEnabled: z.boolean().optional(),
+  wholesaleEnabled: z.boolean().optional(),
   quantityOnHand: z.coerce.number().int().nonnegative().optional(),
   /** False when recording stock the business already owns — no expense is booked. */
   isNewPurchase: z.boolean().optional(),
@@ -363,6 +374,8 @@ const formatCategory = (cat: any, stats: CategoryStats) => {
     stockTrackingMode: cat.stockTrackingMode ?? 'SERIALIZED',
     quantityOnHand: cat.quantityOnHand ?? 0,
     hasUniquePerUnitBarcode: cat.hasUniquePerUnitBarcode ?? null,
+  retailEnabled: cat.retailEnabled ?? true,
+  wholesaleEnabled: cat.wholesaleEnabled ?? true,
     ...stats,
     // Overrides the unit-count figure from stats for quantity-tracked products.
     availableCount,
@@ -499,6 +512,11 @@ export const listCategories = async (req: AuthRequest, res: Response) => {
     if (typeFilter === 'STOCK' || typeFilter === 'INVENTORY') {
       where.type = typeFilter;
     }
+    // A till should only offer what its channel sells. Absent, every product is
+    // returned — the inventory screens want the whole catalogue.
+    const channel = String(req.query.channel ?? '').toUpperCase();
+    if (channel === 'RETAIL') where.retailEnabled = true;
+    else if (channel === 'WHOLESALE') where.wholesaleEnabled = true;
 
     // Pagination is opt-in: callers that just want the whole list (the POS picker,
     // the product dropdowns) keep getting a plain array by not sending `page`.
@@ -626,10 +644,19 @@ export const getCategoryById = async (req: AuthRequest, res: Response) => {
       invoices.find((i: any) => i.type === 'PURCHASE' && i.status === 'APPROVED') ??
       null;
 
+    // With approval switched off no invoice is ever raised, so the quota has to
+    // come from somewhere else or the till can never tell that every authorised
+    // unit has been added — the "Add unit" button would stay live forever.
+    // plannedQty is that source: it is the quantity the purchase authorised, set
+    // at creation and again on each restock.
     const authorisedQty: number | null =
-      approvedInvoice?.authorisedQty != null ? Number(approvedInvoice.authorisedQty) : null;
+      approvedInvoice?.authorisedQty != null
+        ? Number(approvedInvoice.authorisedQty)
+        : (category.plannedQty ?? null);
     const addedQty: number | null =
-      approvedInvoice != null ? Number(approvedInvoice.addedQty ?? 0) : null;
+      approvedInvoice != null
+        ? Number(approvedInvoice.addedQty ?? 0)
+        : Number(stats.totalItems ?? 0);
     const remainingQty: number | null =
       authorisedQty != null && addedQty != null ? Math.max(0, authorisedQty - addedQty) : null;
 
@@ -678,6 +705,12 @@ export const createCategory = async (req: AuthRequest, res: Response) => {
     const abbrev = data.abbreviation.toUpperCase();
     const identifierLabel = resolveIdentifierLabel(data.identifierType, data.identifierLabel);
     const trackingMode = data.stockTrackingMode;
+
+    // Derived rather than trusted: a single-channel org never sees the choice.
+    const channels = resolveChannelFlags(req, data);
+    if (!channelsAreValid(channels)) {
+      return res.status(400).json({ success: false, message: CHANNELS_REQUIRED_MESSAGE });
+    }
     const quantityTracked = trackingMode === 'QUANTITY';
 
     const category = await (prisma as any).inventoryCategory.create({
@@ -688,6 +721,8 @@ export const createCategory = async (req: AuthRequest, res: Response) => {
         abbreviation: abbrev,
         type: (data.type ?? 'STOCK') as any,
         stockTrackingMode: trackingMode as any,
+        retailEnabled: channels.retailEnabled,
+        wholesaleEnabled: channels.wholesaleEnabled,
         barcode: data.barcode || null,
         productCategoryId: data.productCategoryId || null,
         unit: data.unit || null,
@@ -838,6 +873,20 @@ export const updateCategory = async (req: AuthRequest, res: Response) => {
     const data = parsed.data;
     const nextAbbrev = data.abbreviation ? data.abbreviation.toUpperCase() : undefined;
 
+    // Channels: only validated when the caller actually sends one, so an update
+    // that touches only the name cannot fail on a field it never mentioned.
+    let nextChannels: { retailEnabled?: boolean; wholesaleEnabled?: boolean } = {};
+    if (data.retailEnabled !== undefined || data.wholesaleEnabled !== undefined) {
+      const merged = {
+        retailEnabled: data.retailEnabled ?? existing.retailEnabled ?? true,
+        wholesaleEnabled: data.wholesaleEnabled ?? existing.wholesaleEnabled ?? true,
+      };
+      if (!channelsAreValid(merged)) {
+        return res.status(400).json({ success: false, message: CHANNELS_REQUIRED_MESSAGE });
+      }
+      nextChannels = merged;
+    }
+
     let identifierLabel: string | null | undefined = undefined;
     if (data.identifierType !== undefined || data.identifierLabel !== undefined) {
       const resolvedType = data.identifierType ?? (existing.identifierType as string | undefined);
@@ -853,6 +902,8 @@ export const updateCategory = async (req: AuthRequest, res: Response) => {
         barcode: data.barcode !== undefined ? (data.barcode || null) : undefined,
         hasUniquePerUnitBarcode:
           data.hasUniquePerUnitBarcode !== undefined ? data.hasUniquePerUnitBarcode : undefined,
+        retailEnabled: nextChannels.retailEnabled,
+        wholesaleEnabled: nextChannels.wholesaleEnabled,
         productCategoryId:
           data.productCategoryId !== undefined ? (data.productCategoryId || null) : undefined,
         unit: data.unit !== undefined ? (data.unit || null) : undefined,
@@ -1101,6 +1152,25 @@ export const createProductItem = async (req: AuthRequest, res: Response) => {
           },
         });
       }
+    } else if (!requiresApproval) {
+      // Same ceiling without the paperwork: you may hold as many units as the
+      // purchase authorised, and restocking is what raises it. Enforced here as
+      // well as in the UI so a stale page cannot walk past it.
+      const authorised = Number(category.plannedQty ?? 0);
+      if (authorised > 0) {
+        const existing = await (prisma as any).productItem.count({
+          where: { tenantId, categoryId },
+        });
+        if (existing >= authorised) {
+          return res.status(403).json({
+            success: false,
+            error: {
+              code: 'AUTHORISED_QTY_EXCEEDED',
+              message: `All ${authorised} authorised unit(s) have been added. Restock to add more.`,
+            },
+          });
+        }
+      }
     }
     const catType: string = category.type ?? 'STOCK';
     const validStatusSet = catType === 'INVENTORY' ? INVENTORY_STATUSES : STOCK_STATUSES;
@@ -1300,14 +1370,24 @@ export const restockRequest = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // Serialised: unchanged — set the planned quantity and raise a new purchase
-    // invoice that finance must approve before units can be added.
+    // Serialised: raise the authorised quantity, and involve finance only if the
+    // tenant asks for it.
     const needsApproval = await stockApprovalRequired(tenantId);
+
+    // With an invoice, the quota lives on the invoice and starts its own count
+    // from zero, so plannedQty is simply the newly authorised amount. Without
+    // one, the quota is plannedQty measured against every unit that exists — so
+    // it has to be raised above the current count, not reset to the restock
+    // amount, or restocking would leave remaining negative and the button dead.
+    const existingUnits = needsApproval
+      ? 0
+      : await (prisma as any).productItem.count({ where: { tenantId, categoryId: category.id } });
+    const newPlannedQty = needsApproval ? quantity : existingUnits + quantity;
 
     await (prisma as any).inventoryCategory.update({
       where: { id: category.id },
       data: {
-        plannedQty: quantity,
+        plannedQty: newPlannedQty,
         plannedDate: plannedDate ? new Date(plannedDate) : undefined,
         costPrice: costPrice !== undefined ? (costPrice as any) : undefined,
         // Only reset the flag where it gates anything; otherwise it would sit
@@ -1343,8 +1423,12 @@ export const restockRequest = async (req: AuthRequest, res: Response) => {
 
     return res.status(201).json({
       success: true,
-      message: 'Restock request submitted successfully. Awaiting finance approval.',
-      data: { invoice, effectiveCostPrice, quantity },
+      // Saying "awaiting finance approval" when nobody is waiting on finance
+      // just tells the user their stock is stuck when it is not.
+      message: needsApproval
+        ? 'Restock request submitted successfully. Awaiting finance approval.'
+        : `${quantity} more unit(s) authorised for ${category.name}. You can add them now.`,
+      data: { invoice, effectiveCostPrice, quantity, requiresApproval: needsApproval },
     });
   } catch (error) {
     console.error('Error creating restock request:', error);

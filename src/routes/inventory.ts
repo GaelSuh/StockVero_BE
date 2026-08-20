@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { createClient } from '@supabase/supabase-js';
 import { tenantGuard, moduleGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
 import { prisma } from '../db.js';
+import { STORAGE_BUCKET } from '../lib/storage.js';
 import { AuthRequest } from '../types/index.js';
 import { checkInventoryCategoryDependencies, checkProductItemDependencies } from '../services/dependencyCheckService.js';
 import { broadcastToModule } from '../services/notificationService.js';
@@ -60,7 +61,7 @@ const RestockSchema = z.object({
 
 const supabaseUrl = process.env.SUPABASE_URL || '';
 const supabaseKey = process.env.SUPABASE_KEY || '';
-const bucket = process.env.SUPABASE_STORAGE_BUCKET || 'solarflow-files'; // TODO: rename bucket to 'stockvero-files' in Supabase before production migration
+const bucket = STORAGE_BUCKET;
 const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 
 const parseItemMeta = (description?: string | null) => {
