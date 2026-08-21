@@ -1135,11 +1135,18 @@ enum AuditStatus {
 
 // ─── POS: Retail & Wholesale Module Enums ───
 
+/// What kind of business this is. Chosen at signup and changeable in Settings.
+/// Drives which modules are suggested — never which are allowed, since a shop
+/// can always tick something the default did not.
 enum OrganizationType {
   RETAIL_SHOP
   WHOLESALE_DISTRIBUTION
+  /// Sells both ways from the same stock — a shop that also supplies kiosks.
+  RETAIL_WHOLESALE
   MANUFACTURING
   SERVICE_INSTALLATION
+  /// Deliberate escape hatch: better an honest "other" than forcing a wrong fit.
+  OTHER
 }
 
 enum SaleMode {

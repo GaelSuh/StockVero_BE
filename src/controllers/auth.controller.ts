@@ -4,6 +4,7 @@ import bcrypt from 'bcrypt';
 import { prisma } from '../db.js';
 import { generateToken, verifyToken } from '../lib/jwt.js';
 import { MODULE_KEYS, MODULES_CONFIG, OWNER_PERMANENT_MODULES } from '../config/modules.js';
+import { ORGANIZATION_TYPES } from '../config/industries.js';
 import { isValidSlug, generateSlug } from '../lib/slug.js';
 import { defaultSettingsForSignup, readTenantSettings } from '../lib/tenantSettings.js';
 import { AuthRequest, Permission } from '../types/index.js';
@@ -44,6 +45,11 @@ const SignupSchema = z.object({
   organizationName: z.string().min(1),
   slug: z.string().optional(),
   industry: z.string().min(1),
+  /**
+   * The business type behind the industry label. Optional so an older client
+   * still works; absent, it is inferred from the modules that were picked.
+   */
+  organizationType: z.enum(ORGANIZATION_TYPES as [string, ...string[]]).optional(),
   website: z.string().optional(),
   phone: z.string().min(1),
   country: z.string().min(1),
@@ -94,6 +100,7 @@ export const signup = async (req: Request, res: Response) => {
       organizationName,
       slug,
       industry,
+      organizationType,
       website,
       phone,
       country,
@@ -184,6 +191,23 @@ export const signup = async (req: Request, res: Response) => {
       new Set([MODULE_KEYS.DASHBOARD, ...requestedModules]),
     );
 
+    // organizationType was declared on the tenant model but nothing ever wrote
+    // it, so every downstream default had to be guessed from the module list.
+    // An older client that does not send it still gets a sensible value rather
+    // than null.
+    const resolvedOrgType =
+      organizationType ??
+      (selectedModules.includes(MODULE_KEYS.RETAIL_SALES) &&
+      selectedModules.includes(MODULE_KEYS.WHOLESALE_SALES)
+        ? 'RETAIL_WHOLESALE'
+        : selectedModules.includes(MODULE_KEYS.WHOLESALE_SALES)
+          ? 'WHOLESALE_DISTRIBUTION'
+          : selectedModules.includes(MODULE_KEYS.RETAIL_SALES)
+            ? 'RETAIL_SHOP'
+            : selectedModules.includes(MODULE_KEYS.PROJECTS)
+              ? 'SERVICE_INSTALLATION'
+              : 'OTHER');
+
     const sizeValueMap: Record<string, number> = {
       '1-10': 10,
       '11-50': 50,
@@ -205,6 +229,7 @@ export const signup = async (req: Request, res: Response) => {
         name: organizationName,
         subdomain,
         industry,
+        organizationType: (resolvedOrgType as any) ?? undefined,
         website: website || null,
         phone,
         country,
@@ -219,7 +244,10 @@ export const signup = async (req: Request, res: Response) => {
         themeConfig: theme || getDefaultTheme(),
         // Shops and distributors put stock straight on the shelf; project-based
         // businesses keep finance approval in front of it.
-        settingsConfig: defaultSettingsForSignup({ selectedModules }) as any,
+        settingsConfig: defaultSettingsForSignup({
+          organizationType: resolvedOrgType,
+          selectedModules,
+        }) as any,
         status: 'PENDING_APPROVAL',
         users: {
           create: {
@@ -400,6 +428,29 @@ export const checkSlug = async (req: Request, res: Response) => {
   }
 };
 
+/**
+ * The tenant object every auth response returns.
+ *
+ * Written once because it was previously written four times — twice in login and
+ * twice in me — and the copies had already drifted: only the two in me carried
+ * `subdomain`, and none of them carried industry, website or organizationType.
+ * The client filled those gaps with hardcoded defaults, so every login silently
+ * reset the displayed industry to "Solar Energy" and blanked the website.
+ */
+function tenantPayload(tenant: any, logoUrl: string | null) {
+  return {
+    id: tenant.id,
+    name: tenant.name,
+    subdomain: tenant.subdomain,
+    industry: tenant.industry ?? '',
+    website: tenant.website ?? '',
+    organizationType: tenant.organizationType ?? null,
+    theme: tenant.themeConfig,
+    settings: readTenantSettings(tenant),
+    logoUrl,
+  };
+}
+
 export const login = async (req: Request, res: Response) => {
   try {
     const parsed = LoginSchema.safeParse(req.body);
@@ -501,13 +552,7 @@ export const login = async (req: Request, res: Response) => {
             avatarUrl: user.avatarUrl ? await resolveSignedUrl(user.avatarUrl) : null,
             phone: user.phone,
           },
-          tenant: {
-            id: user.tenant.id,
-            name: user.tenant.name,
-            theme: user.tenant.themeConfig,
-          settings: readTenantSettings(user.tenant),
-            logoUrl,
-          },
+          tenant: tenantPayload(user.tenant, logoUrl),
         },
       });
     }
@@ -643,13 +688,7 @@ export const login = async (req: Request, res: Response) => {
           phone: employee.phone,
           jobTitle: employee.jobTitle,
         },
-        tenant: {
-          id: employee.tenant.id,
-          name: employee.tenant.name,
-          theme: employee.tenant.themeConfig,
-          settings: readTenantSettings(employee.tenant),
-          logoUrl: employeeLogoUrl,
-        },
+        tenant: tenantPayload(employee.tenant, employeeLogoUrl),
         userTheme: empPref?.themeConfig ?? null,
       },
     });
@@ -940,14 +979,7 @@ export const me = async (req: AuthRequest, res: Response) => {
             phone: user.phone,
             avatarUrl: user.avatarUrl ? await resolveSignedUrl(user.avatarUrl) : null,
           },
-          tenant: {
-            id: user.tenant.id,
-            name: user.tenant.name,
-            subdomain: user.tenant.subdomain,
-            theme: user.tenant.themeConfig,
-          settings: readTenantSettings(user.tenant),
-            logoUrl,
-          },
+          tenant: tenantPayload(user.tenant, logoUrl),
           userTheme: ownerPref?.themeConfig ?? null,
         },
       });
@@ -1010,14 +1042,7 @@ export const me = async (req: AuthRequest, res: Response) => {
           phone: employee.phone,
           jobTitle: employee.jobTitle,
         },
-        tenant: {
-          id: employee.tenant.id,
-          name: employee.tenant.name,
-          subdomain: employee.tenant.subdomain,
-          theme: employee.tenant.themeConfig,
-          settings: readTenantSettings(employee.tenant),
-          logoUrl: employeeLogoUrl,
-        },
+        tenant: tenantPayload(employee.tenant, employeeLogoUrl),
         userTheme: mePref?.themeConfig ?? null,
       },
     });
