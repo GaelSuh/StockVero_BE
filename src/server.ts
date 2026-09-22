@@ -3,10 +3,10 @@ import cors from 'cors';
 import 'dotenv/config';
 import helmet from 'helmet';
 import compression from 'compression';
-import rateLimit from 'express-rate-limit';
 import swaggerUi from 'swagger-ui-express';
 
 import { errorHandler } from './middleware/errorHandler.js';
+import { authLimiter, apiLimiter } from './middleware/rateLimit.js';
 import authRoutes from './routes/auth.js';
 import inventoryRoutes from './routes/inventory.js';
 import crmRoutes from './routes/crm.js';
@@ -51,23 +51,6 @@ app.use(helmet({
 // ── Compression ───────────────────────────────────────────────────────────────
 app.use(compression());
 
-// ── Rate Limiting ─────────────────────────────────────────────────────────────
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20,                   // 20 attempts per window
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many attempts. Please try again later.' },
-});
-
-const apiLimiter = rateLimit({
-  windowMs: 1 * 60 * 1000, // 1 minute
-  max: 200,                 // 200 requests per minute
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many requests. Please slow down.' },
-});
-
 // ── CORS ──────────────────────────────────────────────────────────────────────
 const allowedOrigins = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(',').map((o) => o.trim())
@@ -107,7 +90,7 @@ app.use('/api/v1/sales', apiLimiter, salesRoutes);
 app.use('/api/v1/returns', apiLimiter, returnsRoutes);
 app.use('/api/v1/price-lists', apiLimiter, priceListsRoutes);
 app.use('/api/v1/delivery-notes', apiLimiter, deliveryRoutes);
-app.use('/api/admin/v1', authLimiter, adminRoutes);
+app.use('/api/admin/v1', apiLimiter, adminRoutes);
 
 if (process.env.NODE_ENV !== 'production') {
   app.use('/api/v1/dev', devRoutes);
