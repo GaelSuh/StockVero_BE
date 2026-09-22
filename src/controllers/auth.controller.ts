@@ -20,9 +20,11 @@ import {
 import { getPeriodEnd, toDecimal } from '../services/billing.service.js';
 import { sendNotification } from '../services/notificationService.js';
 import { sendEmail } from '../services/emailService.js';
-import { tenantRegistrationReceived, forgotPassword as forgotPasswordTemplate } from '../emails/templates.js';
+import { tenantRegistrationReceived, forgotPassword as forgotPasswordTemplate, emailVerification as emailVerificationTemplate } from '../emails/templates.js';
+import { isValidPhone, passwordStrengthMessage } from '../lib/validators.js';
 import { logAudit, extractRequestContext, buildDiff, AuditActorType, AuditStatus } from '../services/auditService.js';
-import { resolveSignedUrl, deleteStoredFile, supabase, STORAGE_BUCKET } from '../lib/storage.js';
+import { resolveSignedUrl, deleteStoredFile, supabase, STORAGE_BUCKET, uploadPrivateFile } from '../lib/storage.js';
+import crypto from 'crypto';
 
 const PaymentMethodSchema = z.object({
   type: z.enum(['CARD', 'MTN_MOMO', 'ORANGE_MOMO']),
@@ -39,7 +41,13 @@ const PaymentMethodSchema = z.object({
 
 const SignupSchema = z.object({
   email: z.string().email(),
-  password: z.string().min(8),
+  password: z
+    .string()
+    .min(8)
+    .superRefine((val, ctx) => {
+      const msg = passwordStrengthMessage(val);
+      if (msg) ctx.addIssue({ code: 'custom', message: msg });
+    }),
   firstName: z.string().min(1),
   lastName: z.string().min(1),
   organizationName: z.string().min(1),
@@ -50,10 +58,36 @@ const SignupSchema = z.object({
    * still works; absent, it is inferred from the modules that were picked.
    */
   organizationType: z.enum(ORGANIZATION_TYPES as [string, ...string[]]).optional(),
+  /**
+   * Free-text business/industry name the owner types when they pick "Something
+   * else" (OTHER). Optional otherwise; required when organisationType == OTHER.
+   */
+  customIndustry: z.string().trim().max(120).optional(),
   website: z.string().optional(),
   phone: z.string().min(1),
   country: z.string().min(1),
   city: z.string().min(1),
+  state: z.string().optional(),
+  /**
+   * Proof that the owner controls the address, issued by
+   * /verify-email/confirm. Required: an unverified address meant a mistyped
+   * email locked someone out of a brand-new account with no way back in,
+   * since every recovery path goes through that same address. Admin approval
+   * (PENDING_APPROVAL) still applies afterwards — this gates it, not replaces it.
+   */
+  verificationToken: z.string().min(1, 'Verify your email before creating the account.'),
+  /**
+   * Optional business-identity evidence. Optional as a product decision, so
+   * every field here may be absent — but the combination is checked below:
+   * a chosen type needs its document, and TAX_ID needs its number. Half-filled
+   * is worse than empty, because it looks submitted to the approving admin.
+   */
+  verificationIdType: z.enum(['TAX_ID', 'NATIONAL_ID']).optional(),
+  verificationIdNumber: z.string().trim().max(64).optional(),
+  /** Object path in the private bucket, from /signup/verification-document. */
+  verificationDocPath: z.string().trim().max(512).optional(),
+  verificationDocName: z.string().trim().max(200).optional(),
+  verificationDocMime: z.string().trim().max(100).optional(),
   // [PAYMENT_DISABLED] - Restore when payment integration is ready
   // organisationSize: z.enum(['1-10', '11-50', '51-200', '201+']),
   organisationSize: z.enum(['1-10', '11-50', '51-200', '201+']).optional().default('1-10'),
@@ -101,10 +135,13 @@ export const signup = async (req: Request, res: Response) => {
       slug,
       industry,
       organizationType,
+      customIndustry,
       website,
       phone,
       country,
       city,
+      state,
+      verificationToken,
       organisationSize,
       modules,
       billingCycle,
@@ -112,6 +149,56 @@ export const signup = async (req: Request, res: Response) => {
       paymentMethod,
       theme,
     } = parsed.data;
+
+    // Identity evidence is optional as a whole, but not partially. Either
+    // nothing was submitted, or what was submitted has to be coherent —
+    // otherwise the approving admin sees "Tax ID" with no number and no
+    // document and cannot tell whether the owner failed to supply it or the
+    // upload silently dropped.
+    const {
+      verificationIdType,
+      verificationIdNumber,
+      verificationDocPath,
+      verificationDocName,
+      verificationDocMime,
+    } = parsed.data;
+    if (verificationIdType && !verificationDocPath) {
+      return res.status(400).json({
+        success: false,
+        message: 'Attach the supporting document, or leave the ID section empty.',
+      });
+    }
+    if (verificationIdType === 'TAX_ID' && !verificationIdNumber?.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Enter the Tax ID number, or leave the ID section empty.',
+      });
+    }
+    // A path with no type is meaningless to the admin reviewing it.
+    if (verificationDocPath && !verificationIdType) {
+      return res.status(400).json({
+        success: false,
+        message: 'Choose whether this document is a Tax ID or a National ID.',
+      });
+    }
+    // Only paths this server issued are accepted. Without this the field is an
+    // open pointer into the private bucket, and a caller could attach some
+    // other tenant's object to their own account.
+    if (verificationDocPath && !verificationDocPath.startsWith('pending-signups/')) {
+      return res.status(400).json({
+        success: false,
+        message: 'That document reference is not valid. Please re-upload the document.',
+      });
+    }
+
+    // A phone number is only valid against the country it belongs to — the
+    // length expected after the dial code differs per country.
+    if (!isValidPhone(phone, country)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Enter a valid phone number for the selected country.',
+      });
+    }
 
     // [PAYMENT_DISABLED] - Restore when payment integration is ready
     // if (paymentMethod.type === 'CARD' && !paymentMethod.cardNumber) {
@@ -128,6 +215,28 @@ export const signup = async (req: Request, res: Response) => {
     //     message: 'Mobile money phone is required',
     //   });
     // }
+
+    // The token must be present (schema-enforced) AND bound to this exact
+    // address. Binding matters: without the email check a token earned for
+    // one address would let an account be created for a different, unverified
+    // one — which is the whole thing this gate exists to prevent.
+    try {
+      const decoded = verifyToken(verificationToken);
+      const valid =
+        decoded.purpose === 'email_verification' &&
+        String(decoded.email ?? '').toLowerCase() === email.toLowerCase();
+      if (!valid) {
+        return res.status(422).json({
+          success: false,
+          message: 'That email has not been verified. Please verify it and try again.',
+        });
+      }
+    } catch {
+      return res.status(422).json({
+        success: false,
+        message: 'Your email verification has expired. Please request a new code and verify again.',
+      });
+    }
 
     const existingUser = await prisma.user.findUnique({ where: { email } });
     if (existingUser) {
@@ -224,16 +333,31 @@ export const signup = async (req: Request, res: Response) => {
     const now = new Date();
     const periodEnd = startTrial ? now : getPeriodEnd(now, billingCycle);
 
+    // For "Something else" (OTHER) the owner describes their industry in their
+    // own words. That name becomes the tenant's industry so every screen that
+    // already reads it keeps working.
+    const storedIndustry =
+      resolvedOrgType === 'OTHER' && customIndustry ? customIndustry : industry;
+
     const tenant = await prisma.tenant.create({
       data: {
         name: organizationName,
         subdomain,
-        industry,
+        industry: storedIndustry,
         organizationType: (resolvedOrgType as any) ?? undefined,
         website: website || null,
         phone,
         country,
         city,
+        state: state || null,
+        // Only the object path is stored — never a URL. Admins read it via a
+        // short-lived signed URL; see GET .../verification-document.
+        verificationIdType: (verificationIdType as any) ?? null,
+        verificationIdNumber:
+          verificationIdType === 'TAX_ID' ? verificationIdNumber?.trim() || null : null,
+        verificationDocPath: verificationDocPath || null,
+        verificationDocName: verificationDocName || null,
+        verificationDocMime: verificationDocMime || null,
         organisationSize: sizeValueMap[organisationSize],
         billingCycle,
         isTrialActive: startTrial,
@@ -375,6 +499,12 @@ export const signup = async (req: Request, res: Response) => {
         orgName: organizationName,
       }),
     });
+
+    // One-time: the verification code cannot be reused for a second account.
+    await prisma.emailVerificationOtp.updateMany({
+      where: { email, usedAt: null },
+      data: { usedAt: new Date() },
+    });
     // TODO: In production, verify EMAIL_FROM domain in Resend dashboard
 
     return res.status(201).json({
@@ -445,6 +575,9 @@ function tenantPayload(tenant: any, logoUrl: string | null) {
     industry: tenant.industry ?? '',
     website: tenant.website ?? '',
     organizationType: tenant.organizationType ?? null,
+    country: tenant.country ?? '',
+    state: tenant.state ?? '',
+    city: tenant.city ?? '',
     theme: tenant.themeConfig,
     settings: readTenantSettings(tenant),
     logoUrl,
@@ -802,6 +935,13 @@ export const changePassword = async (req: AuthRequest, res: Response) => {
         });
       }
 
+      if (await bcrypt.compare(newPassword, user.passwordHash)) {
+        return res.status(400).json({
+          success: false,
+          message: 'New password must be different from the current password',
+        });
+      }
+
       const passwordHash = await bcrypt.hash(newPassword, 10);
       await prisma.user.update({ where: { id: user.id }, data: { passwordHash, passwordChangedAt: null } });
 
@@ -865,6 +1005,13 @@ export const changePassword = async (req: AuthRequest, res: Response) => {
       return res.status(401).json({
         success: false,
         message: 'Invalid current password',
+      });
+    }
+
+    if (await bcrypt.compare(newPassword, employee.passwordHash)) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be different from the current password',
       });
     }
 
@@ -1287,76 +1434,60 @@ export const forgotPassword = async (req: Request, res: Response) => {
       prisma.user.findUnique({ where: { email } }),
       prisma.employee.findUnique({ where: { email } }),
     ]);
+    const record = user || employee;
+    const userType = user ? 'OWNER' : 'EMPLOYEE';
 
-    if (user) {
+    if (record) {
       const otp = String(Math.floor(100000 + Math.random() * 900000));
       const otpHash = await bcrypt.hash(otp, 10);
       const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
 
-      // Invalidate any previous unused OTPs for this user before creating a new one
+      // Invalidate any previous unused OTPs for this account before creating a new one
       await prisma.passwordResetOtp.updateMany({
-        where: { userId: user.id, userType: 'OWNER', usedAt: null },
+        where: { userId: record.id, userType, usedAt: null },
         data: { usedAt: new Date() },
       });
 
       await prisma.passwordResetOtp.create({
         data: {
-          userId: user.id,
-          userType: 'OWNER',
+          userId: record.id,
+          userType,
           otpHash,
           expiresAt,
         },
       });
 
-      void sendEmail({
+      const sent = await sendEmail({
         to: email,
         subject: 'Your StockVero password reset code',
-        html: forgotPasswordTemplate({ name: user.firstName, otpCode: otp }),
+        html: forgotPasswordTemplate({ name: record.firstName, otpCode: otp }),
       });
+
+      // The account genuinely exists but we could not deliver the reset code.
+      // Silently returning success here would lock a real, trusting user out of
+      // their own account, so surface the failure clearly instead.
+      if (!sent) {
+        console.error(`[forgot-password] Failed to email reset code to existing account ${email}`);
+        return res.status(422).json({
+          success: false,
+          message: 'We could not send the reset code to that email. Please check the address or contact support.',
+        });
+      }
+
       void logAudit({
-        tenantId: user.tenantId,
-        actorType: AuditActorType.OWNER,
-        actorId: user.id,
-        action: 'PASSWORD_RESET_REQUESTED',
-        module: 'settings',
-        ...extractRequestContext(req as any),
-      });
-    } else if (employee) {
-      const otp = String(Math.floor(100000 + Math.random() * 900000));
-      const otpHash = await bcrypt.hash(otp, 10);
-      const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
-
-      // Invalidate any previous unused OTPs for this employee before creating a new one
-      await prisma.passwordResetOtp.updateMany({
-        where: { userId: employee.id, userType: 'EMPLOYEE', usedAt: null },
-        data: { usedAt: new Date() },
-      });
-
-      await prisma.passwordResetOtp.create({
-        data: {
-          userId: employee.id,
-          userType: 'EMPLOYEE',
-          otpHash,
-          expiresAt,
-        },
-      });
-
-      void sendEmail({
-        to: email,
-        subject: 'Your StockVero password reset code',
-        html: forgotPasswordTemplate({ name: employee.firstName, otpCode: otp }),
-      });
-      void logAudit({
-        tenantId: employee.tenantId,
-        actorType: AuditActorType.EMPLOYEE,
-        actorId: employee.id,
+        tenantId: (record as any).tenantId,
+        actorType: user === record ? AuditActorType.OWNER : AuditActorType.EMPLOYEE,
+        actorId: record.id,
         action: 'PASSWORD_RESET_REQUESTED',
         module: 'settings',
         ...extractRequestContext(req as any),
       });
     }
 
-    // send the email regardless to avoid user enumeration
+    // Identical response for unknown accounts and successful sends, to avoid
+    // user enumeration. (A real delivery failure above is the only case that
+    // returns a distinct, non-200 response, and only to someone who already
+    // controls the account's inbox.)
     return res.status(200).json({
       success: true,
       message: 'If an account exists for that email, a reset code has been sent.',
@@ -1366,6 +1497,372 @@ export const forgotPassword = async (req: Request, res: Response) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to process request',
+    });
+  }
+};
+
+const RequestEmailVerificationSchema = z.object({
+  email: z.string().email(),
+});
+
+const ConfirmEmailVerificationSchema = z.object({
+  email: z.string().email(),
+  otp: z.string().length(6),
+});
+
+/**
+ * Where a verification code can be delivered.
+ *
+ * Only EMAIL is implemented. A phone channel (SMS or WhatsApp) is expected, and
+ * this enum plus sendVerificationCode below are the seam it plugs into: adding
+ * one means a new case in that switch and nothing else — the OTP generation,
+ * hashing, expiry, cooldown, attempt counting and confirm flow are all
+ * channel-agnostic already.
+ *
+ * Deliberately NOT implemented yet: there is no provider account or approved
+ * message template to send through, so any code here would be untestable
+ * guesswork. Signup already collects and validates a phone number, so the data
+ * needed for it is being captured in the meantime.
+ */
+export type VerificationChannel = 'EMAIL';
+// TODO(phone-channel): add 'SMS' | 'WHATSAPP' here and a matching case in
+// sendVerificationCode once a provider and template are approved.
+
+/**
+ * Delivers a verification code over the requested channel.
+ *
+ * The single place that knows how a code reaches a person. Callers pass a
+ * destination and a channel and get back whether it was delivered; they do not
+ * know or care which transport ran.
+ */
+async function sendVerificationCode(params: {
+  channel: VerificationChannel;
+  /** Email address today; a phone number once a phone channel exists. */
+  destination: string;
+  code: string;
+  name?: string;
+}): Promise<boolean> {
+  const { channel, destination, code, name } = params;
+
+  switch (channel) {
+    case 'EMAIL':
+      return sendEmail({
+        to: destination,
+        subject: 'Confirm your email — StockVero',
+        html: emailVerificationTemplate({ name: name ?? 'there', otpCode: code }),
+      });
+    default: {
+      // Exhaustiveness guard: adding a channel to the union without handling
+      // it here becomes a compile error rather than a silent no-send.
+      const unreachable: never = channel;
+      console.error(`[verification] Unsupported channel: ${String(unreachable)}`);
+      return false;
+    }
+  }
+}
+
+/** How long a signup verification code stays valid. */
+const OTP_TTL_MS = 15 * 60 * 1000;
+/** Minimum gap between code requests for the same address. */
+const RESEND_COOLDOWN_MS = 60 * 1000;
+/**
+ * Wrong guesses allowed per code. Six digits is a million combinations, so this
+ * is not really about brute force inside 15 minutes — it is about not letting a
+ * typo-loop run forever, while still telling the person what is happening.
+ */
+const MAX_OTP_ATTEMPTS = 5;
+
+/** Identity documents only — a scan or photo, or a PDF certificate. */
+const ID_DOC_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+/** Smaller than the 10MB general document cap; this is one page or one photo. */
+const ID_DOC_MAX_BYTES = 5 * 1024 * 1024;
+
+/**
+ * POST /api/v1/auth/signup/verification-document
+ *
+ * Stages the optional business-identity document while the account still does
+ * not exist. Three things make this safe to expose without a session:
+ *
+ *  - It requires the `email_verification` token, so the caller has already
+ *    proved control of the address. It is never anonymous, and the token
+ *    expires in 10 minutes.
+ *  - The object goes to the PRIVATE bucket, so the returned path is not
+ *    fetchable by URL. Only an authenticated admin can later sign it.
+ *  - Type and size are capped before anything is uploaded.
+ *
+ * Returns the object path, which the client passes to /signup. The account is
+ * created from that path — this endpoint writes no database row, because at
+ * this point there is no tenant to attach one to.
+ */
+export const uploadSignupVerificationDocument = async (req: Request, res: Response) => {
+  try {
+    const token = String((req.body as any)?.verificationToken ?? '');
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        message: 'Verify your email before uploading a document.',
+      });
+    }
+
+    let email: string;
+    try {
+      const decoded = verifyToken(token);
+      if (decoded.purpose !== 'email_verification' || !decoded.email) {
+        return res.status(401).json({
+          success: false,
+          message: 'That verification is not valid for uploading a document.',
+        });
+      }
+      email = String(decoded.email).toLowerCase();
+    } catch {
+      return res.status(401).json({
+        success: false,
+        message: 'Your email verification has expired. Please request a new code.',
+      });
+    }
+
+    const file = (req as any).file as
+      | { buffer: Buffer; mimetype: string; originalname: string; size: number }
+      | undefined;
+    if (!file) {
+      return res.status(400).json({ success: false, message: 'No document was attached.' });
+    }
+    if (!ID_DOC_MIME_TYPES.includes(file.mimetype)) {
+      return res.status(400).json({
+        success: false,
+        message: 'That file type is not supported. Upload a JPG, PNG, WEBP or PDF.',
+      });
+    }
+    if (file.size > ID_DOC_MAX_BYTES) {
+      return res.status(400).json({
+        success: false,
+        message: 'That file is larger than 5 MB. Please upload a smaller image or PDF.',
+      });
+    }
+
+    // Keyed by a hash of the email, not the address itself: object paths end up
+    // in storage logs, and an email is personal data in its own right.
+    const emailKey = crypto.createHash('sha256').update(email).digest('hex').slice(0, 32);
+    const cleanName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80);
+    const storagePath = `pending-signups/${emailKey}/${Date.now()}_${cleanName}`;
+
+    const uploaded = await uploadPrivateFile(storagePath, file.buffer, file.mimetype);
+    if (!uploaded.ok) {
+      console.error('[signup-doc] Upload failed:', uploaded.error);
+      return res.status(502).json({
+        success: false,
+        message: 'We could not store that document. Please try again in a moment.',
+      });
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: 'Document uploaded.',
+      data: {
+        storagePath,
+        fileName: file.originalname,
+        mimeType: file.mimetype,
+      },
+    });
+  } catch (error) {
+    console.error('Error uploading signup verification document:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to upload the document. Please try again.',
+    });
+  }
+};
+
+/**
+ * POST /api/v1/auth/verify-email/request
+ *
+ * Sends a 6-digit code to the address the owner gave, so they can prove they
+ * control it before the account is created. This is what stops a mistyped or
+ * nonexistent address from locking someone out of a brand-new account.
+ */
+export const requestEmailVerification = async (req: Request, res: Response) => {
+  try {
+    const parsed = RequestEmailVerificationSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        success: false,
+        message: parsed.error.issues[0]?.message || 'Invalid payload',
+      });
+    }
+
+    const email = parsed.data.email.toLowerCase().trim();
+
+    // Do not hand out codes for addresses that already own an account. Both
+    // tables are checked: an employee's address would otherwise be handed a
+    // code and only collide at account creation, after the person had already
+    // gone to the trouble of verifying it.
+    const [existingUser, existingEmployee] = await Promise.all([
+      prisma.user.findUnique({ where: { email } }),
+      prisma.employee.findUnique({ where: { email } }),
+    ]);
+    if (existingUser || existingEmployee) {
+      return res.status(200).json({
+        success: true,
+        message: 'If an account exists for that email, a code has been sent.',
+      });
+    }
+
+    // Resend cooldown. Without it the endpoint is an open relay: anyone could
+    // aim repeated emails at an address they do not own.
+    const lastCode = await prisma.emailVerificationOtp.findFirst({
+      where: { email },
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true },
+    });
+    if (lastCode) {
+      const elapsedMs = Date.now() - lastCode.createdAt.getTime();
+      if (elapsedMs < RESEND_COOLDOWN_MS) {
+        const waitSeconds = Math.ceil((RESEND_COOLDOWN_MS - elapsedMs) / 1000);
+        return res.status(429).json({
+          success: false,
+          message: `Please wait ${waitSeconds} second${waitSeconds === 1 ? '' : 's'} before requesting another code.`,
+          data: { retryAfterSeconds: waitSeconds },
+        });
+      }
+    }
+
+    // Only one code is ever live per address — requesting a new one retires the
+    // previous, so an old code in an old email cannot still be used.
+    const otp = String(Math.floor(100000 + Math.random() * 900000));
+    const otpHash = await bcrypt.hash(otp, 10);
+    const expiresAt = new Date(Date.now() + OTP_TTL_MS);
+
+    await prisma.emailVerificationOtp.updateMany({
+      where: { email, usedAt: null },
+      data: { usedAt: new Date() },
+    });
+    await prisma.emailVerificationOtp.create({
+      data: { email, otpHash, expiresAt },
+    });
+
+    // Routed through the channel seam rather than calling sendEmail directly,
+    // so a phone channel later needs no change here.
+    const sent = await sendVerificationCode({
+      channel: 'EMAIL',
+      destination: email,
+      code: otp,
+    });
+
+    if (!sent) {
+      console.error(`[verify-email] Failed to email verification code to ${email}`);
+      return res.status(422).json({
+        success: false,
+        message: 'We could not send a verification code to that email. Please check the address and try again.',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Verification code sent.',
+    });
+  } catch (error) {
+    console.error('Error sending email verification code:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to send verification code',
+    });
+  }
+};
+
+/**
+ * POST /api/v1/auth/verify-email/confirm
+ *
+ * Checks the code and, if valid, returns a short-lived token tied to that exact
+ * email. The token is what the signup endpoint requires to proceed.
+ */
+export const confirmEmailVerification = async (req: Request, res: Response) => {
+  try {
+    const parsed = ConfirmEmailVerificationSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        success: false,
+        message: parsed.error.issues[0]?.message || 'Invalid payload',
+      });
+    }
+
+    const email = parsed.data.email.toLowerCase().trim();
+    const { otp } = parsed.data;
+
+    // Fetched without the expiry filter so an expired code can be reported as
+    // expired. Filtering it out here made a timed-out code indistinguishable
+    // from a wrong one, and "invalid or has expired" told the user neither.
+    const record = await prisma.emailVerificationOtp.findFirst({
+      where: { email, usedAt: null },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!record) {
+      return res.status(400).json({
+        success: false,
+        message: 'No verification code is pending for this email. Request a new one.',
+      });
+    }
+
+    if (record.expiresAt.getTime() <= Date.now()) {
+      return res.status(400).json({
+        success: false,
+        message: 'That code has expired. Request a new one.',
+        data: { reason: 'expired' },
+      });
+    }
+
+    if (record.attempts >= MAX_OTP_ATTEMPTS) {
+      // Retired so the next attempt cannot keep hammering a burnt code.
+      await prisma.emailVerificationOtp.update({
+        where: { id: record.id },
+        data: { usedAt: new Date() },
+      });
+      return res.status(429).json({
+        success: false,
+        message: 'Too many incorrect attempts on that code. Request a new one.',
+        data: { reason: 'attempts_exhausted' },
+      });
+    }
+
+    const isValid = await bcrypt.compare(otp, record.otpHash);
+    if (!isValid) {
+      const attempts = record.attempts + 1;
+      await prisma.emailVerificationOtp.update({
+        where: { id: record.id },
+        data: { attempts },
+      });
+      const remaining = MAX_OTP_ATTEMPTS - attempts;
+      return res.status(400).json({
+        success: false,
+        message: remaining > 0
+          ? `That code is incorrect. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`
+          : 'That code is incorrect, and you have no attempts left. Request a new one.',
+        data: { reason: 'incorrect', attemptsRemaining: Math.max(0, remaining) },
+      });
+    }
+
+    // Spent on success. Without this the code stayed replayable for the rest of
+    // its 15-minute window, so one intercepted email could be reused.
+    await prisma.emailVerificationOtp.update({
+      where: { id: record.id },
+      data: { usedAt: new Date() },
+    });
+
+    const verificationToken = generateToken({
+      email,
+      purpose: 'email_verification',
+    }, '10m');
+
+    return res.status(200).json({
+      success: true,
+      message: 'Email verified.',
+      data: { verificationToken },
+    });
+  } catch (error) {
+    console.error('Error confirming email verification:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to verify email',
     });
   }
 };
@@ -1474,6 +1971,26 @@ export const resetPassword = async (req: Request, res: Response) => {
     }
 
     const { userId, userType } = decoded;
+
+    const currentRecord = userType === 'OWNER'
+      ? await prisma.user.findUnique({ where: { id: userId }, select: { passwordHash: true } })
+      : await prisma.employee.findUnique({ where: { id: userId }, select: { passwordHash: true } });
+
+    if (!currentRecord) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+      });
+    }
+
+    // Reject reusing the current password so a reset must actually change it.
+    if (await bcrypt.compare(newPassword, currentRecord.passwordHash)) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be different from the current password',
+      });
+    }
+
     const passwordHash = await bcrypt.hash(newPassword, 10);
 
     if (userType === 'OWNER') {

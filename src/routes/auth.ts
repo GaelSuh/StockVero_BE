@@ -1,6 +1,17 @@
 import { Router } from 'express';
-import { signup, login, refresh, changePassword, me, updateMe, forgotPassword, verifyOtp, resetPassword, checkSlug } from '../controllers/auth.controller.js';
+import multer from 'multer';
+import { signup, login, refresh, changePassword, me, updateMe, forgotPassword, verifyOtp, resetPassword, checkSlug, requestEmailVerification, confirmEmailVerification, uploadSignupVerificationDocument } from '../controllers/auth.controller.js';
 import { tenantGuard, mustChangePasswordGuard } from '../middleware/auth.js';
+
+/**
+ * Memory storage, matching the documents router. The 5MB ceiling is enforced
+ * here as well as in the handler so an oversized body is rejected before it is
+ * fully buffered, rather than after.
+ */
+const idDocUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
 
 const router = Router();
 
@@ -39,6 +50,71 @@ const router = Router();
  */
 router.post('/signup', signup);
 router.get('/check-slug', checkSlug);
+
+/**
+ * @openapi
+ * /api/v1/auth/verify-email/request:
+ *   post:
+ *     summary: Send a one-time verification code to an email address
+ *     tags: [Auth]
+ *     security: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email]
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 format: email
+ *     responses:
+ *       200:
+ *         description: Verification code sent
+ */
+router.post('/verify-email/request', requestEmailVerification);
+
+/**
+ * Unauthenticated by necessity — the account does not exist yet — but NOT
+ * unguarded: the handler requires a valid `email_verification` token, and the
+ * object lands in the private bucket. There is no read route here; only an
+ * authenticated admin can retrieve the document afterwards.
+ */
+router.post(
+  '/signup/verification-document',
+  idDocUpload.single('file'),
+  uploadSignupVerificationDocument,
+);
+
+/**
+ * @openapi
+ * /api/v1/auth/verify-email/confirm:
+ *   post:
+ *     summary: Confirm an email verification code and receive a signup token
+ *     tags: [Auth]
+ *     security: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, otp]
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 format: email
+ *               otp:
+ *                 type: string
+ *                 minLength: 6
+ *                 maxLength: 6
+ *     responses:
+ *       200:
+ *         description: Email verified
+ */
+router.post('/verify-email/confirm', confirmEmailVerification);
+
 
 /**
  * @openapi

@@ -13,6 +13,7 @@ import {
   updateTenantModules,
   updateTenantOwner,
   resetTenantOwnerPassword,
+  getTenantVerificationDocument,
 } from '../../controllers/admin.tenants.controller.js';
 
 const router = Router();
@@ -250,5 +251,12 @@ router.patch('/tenants/:id/owner', adminGuard, updateTenantOwner);
  *         description: Owner password reset
  */
 router.patch('/tenants/:id/owner/reset-password', adminGuard, resetTenantOwnerPassword);
+
+/**
+ * Identity document from signup. adminGuard'd — this is the only read path for
+ * a private-bucket object containing PII, and it returns a 10-minute signed URL
+ * rather than the stored path.
+ */
+router.get('/tenants/:id/verification-document', adminGuard, getTenantVerificationDocument);
 
 export default router;
