@@ -1,0 +1,21 @@
+-- ProductVariant.axisOrder — the display order of a variant's attribute axes.
+--
+-- Why a separate column instead of reading the key order back off
+-- `attributes`: that column is jsonb, and jsonb SORTS object keys (by length,
+-- then bytewise) rather than preserving insertion order. Submitting
+-- {"Color":"Red","Size":"L"} and reading it back yields {"Size":..,"Color":..},
+-- so the first variant's axis order — which every later variant of the same
+-- product is supposed to follow — was unrecoverable.
+--
+-- Observed before this fix: variant 1 labelled "Red / L" (built from the
+-- request body, order intact) while variant 2 of the same product labelled
+-- "M / Blue" (built from jsonb's re-sorted key order). Same product, two
+-- different axis orders.
+--
+-- Switching the column to `json` would also preserve order, but silently:
+-- anyone later adding a GIN index for attribute search would have to move it
+-- back to jsonb and would break labelling again with no warning. An explicit
+-- column cannot be broken that way.
+
+-- AlterTable
+ALTER TABLE "product_variants" ADD COLUMN     "axis_order" TEXT[] DEFAULT ARRAY[]::TEXT[];

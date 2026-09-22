@@ -1,5 +1,17 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  /// `partialIndexes` lets this schema declare filtered unique indexes
+  /// (`@@unique([...], where: raw("..."))`). Three already existed in the
+  /// database, added by hand-written migration SQL, and this schema could not
+  /// describe them — so `schema.prisma` disagreed with the real database.
+  ///
+  /// Important: while this flag is ON, Prisma *sees* partial indexes, so any
+  /// partial index that is not declared here will be DROPPED by the next
+  /// migration. All three are declared (search this file for `where: raw`).
+  /// Do not remove one of those declarations without also dropping the index
+  /// deliberately. Turning this flag back off makes Prisma blind to them
+  /// again, which is inert but restores the original schema-vs-database lie.
+  previewFeatures = ["partialIndexes"]
 }
 
 datasource db {
@@ -16,6 +28,23 @@ model Tenant {
   phone                      String?
   country                    String?
   city                       String?
+  state                      String?
+
+  /// Optional business-identity evidence supplied at signup, for the admin who
+  /// approves the account. Optional by product decision — signup is never
+  /// blocked on it.
+  ///
+  /// The document itself is PII (a tax certificate or a government ID card), so
+  /// only its object path is stored, in the PRIVATE storage bucket. Nothing here
+  /// is a public URL: admins read it through a short-lived signed URL, unlike
+  /// the public-bucket URLs the older Document model keeps.
+  verificationIdType   TenantVerificationIdType? @map("verification_id_type")
+  /// Present for TAX_ID; a national ID card is identified by the image alone.
+  verificationIdNumber String?                   @map("verification_id_number")
+  /// Object path inside the private bucket, never a URL.
+  verificationDocPath  String?                   @map("verification_doc_path")
+  verificationDocName  String?                   @map("verification_doc_name")
+  verificationDocMime  String?                   @map("verification_doc_mime")
   subscriptionPlan           SubscriptionPlan            @default(STARTER) @map("subscription_plan")
   status                     TenantStatus                @default(PENDING_APPROVAL)
   suspendedReason            String?                     @map("suspended_reason")
@@ -56,6 +85,7 @@ model Tenant {
   productCategories          ProductCategory[]
   productItemMaintenanceLogs ProductItemMaintenanceLog[]
   productItems               ProductItem[]
+  productVariants            ProductVariant[]
   projectAssignments         ProjectAssignment[]
   projectMaterials           ProjectMaterial[]
   projectMilestones          ProjectMilestone[]
@@ -364,6 +394,17 @@ model InventoryCategory {
   sku               String
   abbreviation      String
   name              String
+  /// Unique per tenant when set, enforced by the PARTIAL unique index
+  /// declared below: `(tenant_id, barcode) WHERE barcode IS NOT NULL`.
+  ///
+  /// It must stay partial. A plain `@@unique([tenantId, barcode])` would be
+  /// wrong here in intent — it reads as "one product per barcode" but would
+  /// also start constraining the many products that have no barcode at all.
+  /// The filter keeps the rule where it belongs: on products that actually
+  /// carry a barcode.
+  ///
+  /// The separate non-unique `@@index([tenantId, barcode])` below is kept for
+  /// query performance and is not the constraint.
   barcode           String?
   productCategoryId String?            @map("product_category_id")
   /// How this product's stock is counted. SERIALIZED counts ProductItem rows
@@ -413,19 +454,122 @@ model InventoryCategory {
   projectMaterials  ProjectMaterial[]  @relation("CategoryProjectMaterials")
   saleItems         SaleItem[]
   priceRules        PriceRule[]
+  /// Phase 1 of product variants (2026-09). Empty for every product that has
+  /// none — variantId stays null everywhere downstream and existing data is
+  /// untouched. Variants apply only to InventoryCategory, never InventoryItem.
+  variants          ProductVariant[]
 
   @@unique([tenantId, sku])
+  /// Matches the live index `inventory_categories_tenant_id_barcode_key`.
+  @@unique([tenantId, barcode], where: raw("barcode IS NOT NULL"))
   @@index([tenantId])
   @@index([tenantId, productCategoryId])
   @@index([tenantId, barcode])
   @@map("inventory_categories")
 }
 
+/// Phase 1 of product variants (2026-09, design-review approved). A variant
+/// is one buyable option of a product — "Red / L / Glitter" — never its own
+/// InventoryCategory row. Deliberately applies only to InventoryCategory,
+/// never to the legacy InventoryItem model.
+///
+/// Attribute option axes (size, color, texture, ...) are defined per product
+/// rather than normalized into their own tables: `attributes` is a Json map
+/// of axis -> value on purpose, not a placeholder for a future normalized
+/// design — different product categories have completely different axes and
+/// there is no shared vocabulary worth enforcing across tenants.
+model ProductVariant {
+  id         String            @id @default(uuid())
+  tenantId   String            @map("tenant_id")
+  category   InventoryCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  categoryId String            @map("category_id")
+
+  /// Option values that define this variant, e.g. {"size":"L","color":"Red","texture":"Glitter"}.
+  ///
+  /// This is jsonb, which SORTS object keys (by length, then bytewise) — the
+  /// order the client submitted them in is gone by the time it is read back.
+  /// That is why `axisOrder` below exists: the display order cannot be
+  /// recovered from this column, only the values.
+  attributes Json   @default("{}")
+  /// The axis names in the order the label is built from, e.g.
+  /// ["Color","Size","Texture"]. Captured from the submitting client's key
+  /// order on the first variant of a product, then reused by every later
+  /// variant of that product so labels stay consistent ("Red / L", "Blue / M"
+  /// — never "M / Blue"). Kept as its own column precisely because
+  /// `attributes` cannot preserve it.
+  axisOrder  String[] @default([]) @map("axis_order")
+  /// Flattened display string built from `attributes` in a stable, per-product
+  /// axis order at write time, e.g. "Red / L / Glitter" — so receipts, stock
+  /// logs and pickers never have to re-derive axis ordering from raw JSON.
+  label      String
+
+  /// Parent product's sku plus a suffix, e.g. "SHOE-001-RED-L". Optional:
+  /// generating a matrix of a dozen combinations at once cannot invent a
+  /// dozen meaningful codes, so generated variants start without one and it
+  /// is filled in per variant afterwards. Unique per tenant WHEN SET, via the
+  /// partial index below — same shape as barcode, so any number of variants
+  /// may have no sku at all.
+  sku        String?
+
+  /// Optional, own barcode distinct from the parent product's — set only
+  /// when a variant is physically labelled with its own code. Unique per
+  /// tenant when set, via the PARTIAL unique index declared below — same
+  /// shape as InventoryCategory.barcode, and declared here rather than in
+  /// migration SQL because the `partialIndexes` preview feature is enabled
+  /// (see the generator block): an undeclared partial index would be
+  /// DROPPED by the next migration.
+  barcode    String?
+
+  /// Null = inherit the parent product's sellingPrice. Set = this variant's
+  /// own flat price — itself still outranked by a matching PriceRule tier;
+  /// see the 6-tier cascade in priceResolutionService.ts.
+  priceOverride Decimal? @map("price_override") @db.Decimal(15, 2)
+
+  /// Meaningful only when the parent category's stockTrackingMode is
+  /// QUANTITY. For SERIALIZED products a variant carries no quantity column
+  /// at all: its stock is the count of AVAILABLE ProductItem rows pointing
+  /// at it, read through getAvailableStock (lib/stock.ts) — the same
+  /// division of responsibility the parent category already follows.
+  quantityOnHand Int @default(0) @map("quantity_on_hand")
+
+  isActive  Boolean @default(true) @map("is_active")
+  sortOrder Int     @default(0) @map("sort_order")
+  imageUrl  String? @map("image_url")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant          Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  productItems    ProductItem[]
+  priceRules      PriceRule[]
+  saleItems       SaleItem[]
+  saleReturnItems SaleReturnItem[]
+  stockLogs       CategoryStockLog[]
+
+  @@unique([tenantId, sku], where: raw("sku IS NOT NULL"))
+  @@unique([tenantId, barcode], where: raw("barcode IS NOT NULL"))
+  @@index([tenantId])
+  @@index([tenantId, categoryId])
+  @@index([tenantId, categoryId, isActive])
+  @@index([tenantId, barcode])
+  @@map("product_variants")
+}
+
 model ProductItem {
   id                String                      @id @default(uuid())
   tenantId          String                      @map("tenant_id")
   categoryId        String                      @map("category_id")
-  systemId          String                      @unique @map("system_id")
+  /// Was globally @unique; rescoped to unique-per-tenant as part of phase 1
+  /// of product variants (2026-09). The format ({ABBR}-{YYYYMMDD}-{seq}) is a
+  /// per-tenant human-readable document number, and two tenants can pick the
+  /// same category abbreviation independently — under the old global
+  /// constraint the second tenant's first unit of the day collided.
+  ///
+  /// ANY `findUnique({ where: { systemId } })` must become
+  /// `findUnique({ where: { tenantId_systemId: { tenantId, systemId } } })`
+  /// or `findFirst({ where: { systemId, tenantId } })`. At the time of this
+  /// change there were none in the codebase.
+  systemId          String                      @map("system_id")
   name              String?
   userIdentifier    String?                     @map("user_identifier")
   stockStatus       StockItemStatus?            @map("stock_status")
@@ -434,15 +578,26 @@ model ProductItem {
   projectId         String?                     @map("project_id")
   projectMaterialId String?                     @map("project_material_id")
   addedAfterInvoice Boolean                     @default(false) @map("added_after_invoice")
+  /// Null = this product has no variants (untouched existing data) or this
+  /// unit predates variants being enabled for its product. For SERIALIZED
+  /// products, a variant's on-hand stock is the count of AVAILABLE
+  /// ProductItem rows with this variantId — see getAvailableStock in
+  /// lib/stock.ts, the single source of truth for stock reads.
+  variantId         String?                     @map("variant_id")
   createdAt         DateTime                    @default(now()) @map("created_at")
   updatedAt         DateTime                    @updatedAt @map("updated_at")
   maintenanceLogs   ProductItemMaintenanceLog[]
   category          InventoryCategory           @relation(fields: [categoryId], references: [id])
+  variant           ProductVariant?             @relation(fields: [variantId], references: [id], onDelete: Restrict)
   tenant            Tenant                      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  saleItems         SaleItem[]
 
+  @@unique([tenantId, systemId])
   @@index([tenantId, categoryId])
   @@index([tenantId, categoryId, stockStatus])
   @@index([tenantId, categoryId, inventoryStatus])
+  @@index([tenantId, categoryId, variantId, stockStatus])
+  @@index([tenantId, categoryId, variantId, inventoryStatus])
   @@index([tenantId, projectId])
   @@map("product_items")
 }
@@ -479,12 +634,22 @@ model CategoryStockLog {
   /// Id the device generated when the stock movement was recorded offline. Makes
   /// a replayed sync idempotent — the same delivery cannot be received twice.
   offlineId    String?           @map("offline_id")
+  /// Which variant this add/remove event applied to. Null for products with
+  /// no variants. So the stock-detail page can show units-added-and-removed
+  /// history accurately per variant instead of aggregated across every
+  /// variant of a product.
+  variantId    String?           @map("variant_id")
   createdAt    DateTime          @default(now()) @map("created_at")
   category     InventoryCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   tenant       Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  variant      ProductVariant?   @relation(fields: [variantId], references: [id], onDelete: Cascade)
 
-  @@unique([tenantId, offlineId])
+  /// Partial, matching the live index `category_stock_logs_tenant_id_offline_id_key`.
+  /// The filter is what makes replay idempotency work: rows recorded online
+  /// have no offlineId, and many NULLs must coexist freely.
+  @@unique([tenantId, offlineId], where: raw("offline_id IS NOT NULL"))
   @@index([tenantId, categoryId])
+  @@index([tenantId, categoryId, variantId])
   @@map("category_stock_logs")
 }
 
@@ -585,6 +750,11 @@ model CustomerPurchase {
   createdAt           DateTime           @default(now()) @map("created_at")
   updatedAt           DateTime           @updatedAt @map("updated_at")
   inventoryCategoryId String?            @map("inventory_category_id")
+  /// Exact ProductItem rows this purchase claimed, in the order they were
+  /// taken (oldest-first at the time of purchase). Empty for purchases
+  /// recorded before this field existed or ones not linked to inventory —
+  /// undo for those can't identify an exact unit and must not guess.
+  productItemIds      String[]           @default([]) @map("product_item_ids")
   customer            Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
   inventoryCategory   InventoryCategory? @relation(fields: [inventoryCategoryId], references: [id])
   tenant              Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -868,6 +1038,24 @@ model PasswordResetOtp {
   @@map("password_reset_otps")
 }
 
+/// One-time codes used to prove an owner actually controls the email address
+/// they gave at signup, before the account is created.
+model EmailVerificationOtp {
+  id        String    @id @default(uuid())
+  email     String    @map("email")
+  otpHash   String    @map("otp_hash")
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  /// Wrong guesses against this code. Capped so a 6-digit code cannot be
+  /// brute-forced inside its 15-minute window; the caller is told how many
+  /// tries remain rather than being cut off without explanation.
+  attempts  Int       @default(0)
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@index([email])
+  @@map("email_verification_otps")
+}
+
 model Document {
   id           String         @id @default(uuid())
   tenantId     String         @map("tenant_id")
@@ -1024,13 +1212,18 @@ enum ProductType {
 
 /// Status values used when the parent category is of type STOCK.
 /// Exactly one of stockStatus / inventoryStatus is set per ProductItem.
+/// Which kind of business-identity evidence the owner chose at signup.
+enum TenantVerificationIdType {
+  TAX_ID
+  NATIONAL_ID
+}
+
 enum StockItemStatus {
   AVAILABLE
   DEPLOYED
   UNDER_MAINTENANCE
   FAULTY
   COMPLETELY_BAD
-  SOLD
 }
 
 /// Status values used when the parent category is of type INVENTORY.
@@ -1222,6 +1415,10 @@ model Sale {
   paymentStatus SalePaymentStatus @default(PAID) @map("payment_status")
   amountPaid    Decimal           @map("amount_paid") @db.Decimal(15, 2)
   amountOwed    Decimal           @default(0) @map("amount_owed") @db.Decimal(15, 2)
+  /// Money tendered beyond the sale total (e.g. cash paid over the amount due).
+  /// Never left owed to the customer as change or credit — attributed to
+  /// `soldById` as a tip and recorded as its own income transaction.
+  tipAmount     Decimal           @default(0) @map("tip_amount") @db.Decimal(15, 2)
   creditDueDate DateTime?         @map("credit_due_date")
 
   deliveryStatus  DeliveryStatus? @map("delivery_status")
@@ -1278,13 +1475,35 @@ model SaleItem {
   batchNumber String? @map("batch_number")
   lotNumber   String? @map("lot_number")
 
+  /// The specific serialized unit sold on this line, if the product is
+  /// SERIALIZED. Null for QUANTITY-tracked lines, which have no single unit.
+  productItemId String? @map("product_item_id")
+  /// Denormalized copy of the unit's identifier at sale time, so the receipt
+  /// still shows it even if the ProductItem is later edited or removed.
+  serialNumber   String? @map("serial_number")
+
+  /// Null when the product has no variants. Resolved and snapshotted
+  /// server-side in sales.controller.ts from the ProductVariant row, not
+  /// trusted verbatim from the client — same reasoning as the retail price
+  /// fix: a sale line is not a place to trust unverified client input about
+  /// what was actually sold.
+  variantId    String? @map("variant_id")
+  /// Denormalized copy of ProductVariant.label at sale time, following the
+  /// exact precedent set by serialNumber above — survives later edits to or
+  /// deletion of the source variant.
+  variantLabel String? @map("variant_label")
+
   createdAt DateTime @default(now()) @map("created_at")
 
-  sale     Sale              @relation(fields: [saleId], references: [id], onDelete: Cascade)
-  category InventoryCategory @relation(fields: [categoryId], references: [id])
+  sale        Sale              @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  category    InventoryCategory @relation(fields: [categoryId], references: [id])
+  productItem ProductItem?      @relation(fields: [productItemId], references: [id])
+  variant     ProductVariant?   @relation(fields: [variantId], references: [id], onDelete: SetNull)
 
   @@index([saleId])
   @@index([categoryId])
+  @@index([productItemId])
+  @@index([variantId])
   @@map("sale_items")
 }
 
@@ -1345,10 +1564,16 @@ model SaleReturnItem {
   productName String  @map("product_name")
   quantity    Int
   unitPrice   Decimal @map("unit_price") @db.Decimal(15, 2)
+  /// Which variant is coming back. Without this, a return on a variant
+  /// product can't say which option it is — meaning a return would restock
+  /// the wrong option once variants exist. Correctness fix, not optional.
+  variantId   String? @map("variant_id")
 
-  saleReturn SaleReturn @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  saleReturn SaleReturn      @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  variant    ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
 
   @@index([returnId])
+  @@index([variantId])
   @@map("sale_return_items")
 }
 
@@ -1366,6 +1591,11 @@ model PriceList {
   rules     PriceRule[]
   customers CustomerPriceList[]
 
+  /// At most one default price list per tenant. Partial on `is_default`, so
+  /// any number of non-default lists coexist. priceResolutionService reads
+  /// this with findFirst({ tenantId, isDefault: true }) and would silently
+  /// pick an arbitrary winner if two ever existed.
+  @@unique([tenantId], where: raw("is_default"), map: "price_lists_one_default_per_tenant")
   @@index([tenantId])
   @@map("price_lists")
 }
@@ -1374,15 +1604,30 @@ model PriceRule {
   id          String  @id @default(uuid())
   priceListId String  @map("price_list_id")
   categoryId  String  @map("category_id")
+  /// Null = applies to every variant of the product (and to products with no
+  /// variants at all) — this is what every pre-phase-1 rule has and keeps.
+  /// Set = applies only to this one variant, and outranks a null-variant
+  /// rule at the same minQuantity tier. See the 6-tier cascade in
+  /// priceResolutionService.ts.
+  variantId   String? @map("variant_id")
   minQuantity Int     @default(1) @map("min_quantity")
   unitPrice   Decimal @map("unit_price") @db.Decimal(15, 2)
 
   priceList PriceList         @relation(fields: [priceListId], references: [id], onDelete: Cascade)
   category  InventoryCategory @relation(fields: [categoryId], references: [id])
+  variant   ProductVariant?   @relation(fields: [variantId], references: [id], onDelete: Cascade)
 
-  @@unique([priceListId, categoryId, minQuantity])
+  /// Two partial unique indexes, not one NULLS NOT DISTINCT constraint —
+  /// confirmed empirically that Prisma 7.8's diffing never sees NULLS NOT
+  /// DISTINCT (matches on name+columns only, blind to the clause itself),
+  /// making it a permanent, not just next-migration, drop hazard. These two
+  /// are fully visible to partialIndexes diffing instead: one product-level
+  /// rule per tier, one rule per variant per tier.
+  @@unique([priceListId, categoryId, minQuantity], where: raw("variant_id IS NULL"), map: "price_rules_product_tier_key")
+  @@unique([priceListId, categoryId, variantId, minQuantity], where: raw("variant_id IS NOT NULL"), map: "price_rules_variant_tier_key")
   @@index([priceListId])
   @@index([categoryId])
+  @@index([priceListId, categoryId, variantId])
   @@map("price_rules")
 }
 
@@ -1390,6 +1635,11 @@ model CustomerPriceList {
   id          String @id @default(uuid())
   customerId  String @map("customer_id")
   priceListId String @map("price_list_id")
+
+  /// When this customer was put on this price list. The assignment list shows
+  /// it, and without the column every row rendered "Invalid Date" — the UI was
+  /// reading a field that had never existed.
+  createdAt DateTime @default(now()) @map("created_at")
 
   customer  Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
   priceList PriceList @relation(fields: [priceListId], references: [id], onDelete: Cascade)
