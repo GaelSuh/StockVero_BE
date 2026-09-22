@@ -6,6 +6,29 @@ import { broadcastToModule } from '../services/notificationService.js';
 import { createPaymentInvoice } from '../services/invoiceService.js';
 import { logAudit, extractRequestContext, buildDiff, AuditActorType } from '../services/auditService.js';
 import { recordStockEvent } from './inventory.items.controller.js';
+import { getCustomerCreditSales, getCustomerPurchaseHistory } from '../services/creditService.js';
+import { isValidPhone } from '../lib/validators.js';
+
+/**
+ * A phone number is only meaningful against the country it belongs to — the
+ * expected length after the dial code differs per country. Signup already
+ * enforces this (auth.controller.ts), but customer records accepted anything
+ * at all, so `666666666666666` saved happily. Validated against the tenant's
+ * own country, since a Customer row carries no country of its own.
+ *
+ * Returns an error message, or null when the number is acceptable.
+ */
+async function validateCustomerPhone(tenantId: string, phone?: string): Promise<string | null> {
+  if (!phone || !phone.trim()) return null;
+  const tenant = await prisma.tenant.findUnique({
+    where: { id: tenantId },
+    select: { country: true },
+  });
+  if (isValidPhone(phone, tenant?.country ?? undefined)) return null;
+  return tenant?.country
+    ? `Enter a valid phone number for ${tenant.country}.`
+    : 'Enter a valid phone number.';
+}
 
 const CustomerSchema = z.object({
   name: z.string().min(1),
@@ -31,6 +54,11 @@ export const createCustomer = async (req: AuthRequest, res: Response) => {
     }
 
     const data = parsed.data;
+    const phoneError = await validateCustomerPhone(req.tenantId!, data.phone);
+    if (phoneError) {
+      return res.status(400).json({ success: false, message: phoneError });
+    }
+
     const customer = await prisma.customer.create({
       data: {
         tenantId: req.tenantId!,
@@ -258,6 +286,75 @@ export const getCustomerInvoices = async (req: AuthRequest, res: Response) => {
   }
 };
 
+/**
+ * A customer's outstanding balance and the sales behind it — reuses
+ * getCustomerCreditSales, the same aggregation the Credit Customers list and
+ * the delete-dependency check already rely on, so this is one more reader of
+ * that single source of truth, not a second computation of it.
+ */
+export const getCustomerCreditSalesController = async (req: AuthRequest, res: Response) => {
+  try {
+    const customer = await prisma.customer.findFirst({
+      where: { id: req.params.id, tenantId: req.tenantId! },
+      select: { id: true },
+    });
+    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
+
+    const sales = await getCustomerCreditSales(req.tenantId!, customer.id);
+    const totalOwed = sales.reduce((sum, s) => sum + Number(s.amountOwed), 0);
+
+    return res.json({
+      success: true,
+      data: {
+        totalOwed,
+        sales: sales.map((s) => ({
+          id: s.id,
+          saleNumber: s.saleNumber,
+          mode: s.mode,
+          date: s.createdAt,
+          totalAmount: Number(s.totalAmount),
+          amountPaid: Number(s.amountPaid),
+          amountOwed: Number(s.amountOwed),
+          paymentStatus: s.paymentStatus,
+          creditDueDate: s.creditDueDate,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching customer credit sales:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve customer credit sales',
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+};
+
+/**
+ * Real purchase history — replaces the old manual CustomerPurchase ledger on
+ * the Purchases tab, which nobody ever filled in. This is line items from
+ * actual completed sales, not a self-reported list.
+ */
+export const getCustomerPurchaseHistoryController = async (req: AuthRequest, res: Response) => {
+  try {
+    const customer = await prisma.customer.findFirst({
+      where: { id: req.params.id, tenantId: req.tenantId! },
+      select: { id: true },
+    });
+    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
+
+    const purchases = await getCustomerPurchaseHistory(req.tenantId!, customer.id);
+    return res.json({ success: true, data: purchases });
+  } catch (error) {
+    console.error('Error fetching customer purchase history:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve purchase history',
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+};
+
 export const updateCustomer = async (req: AuthRequest, res: Response) => {
   try {
     const parsed = CustomerSchema.partial().safeParse(req.body);
@@ -276,6 +373,11 @@ export const updateCustomer = async (req: AuthRequest, res: Response) => {
         success: false,
         message: 'Customer not found',
       });
+    }
+
+    const phoneError = await validateCustomerPhone(req.tenantId!, parsed.data.phone);
+    if (phoneError) {
+      return res.status(400).json({ success: false, message: phoneError });
     }
 
     const customer = await prisma.customer.update({
@@ -452,19 +554,21 @@ export const addCustomerPurchase = async (req: AuthRequest, res: Response) => {
         });
       }
 
-      // Find N available units and mark them SOLD in a transaction
+      // Find N available units and mark them DEPLOYED in a transaction — same
+      // terminal "gone, not in stock" status a POS sale uses. The exact ids
+      // are recorded on the purchase itself so undo can restore precisely
+      // these units later rather than guessing by status.
       const availableItems = await (prisma as any).productItem.findMany({
         where: { tenantId: req.tenantId!, categoryId: inventoryCategoryId, stockStatus: 'AVAILABLE' },
-        select: { id: true },
+        select: { id: true, systemId: true },
         take: quantity,
         orderBy: { createdAt: 'asc' },
       });
 
       const purchase = await prisma.$transaction(async (tx: any) => {
-        // Mark units as SOLD
         await tx.productItem.updateMany({
           where: { id: { in: availableItems.map((i: any) => i.id) } },
-          data: { stockStatus: 'SOLD' },
+          data: { stockStatus: 'DEPLOYED' },
         });
 
         // Create purchase record with category link
@@ -479,6 +583,7 @@ export const addCustomerPurchase = async (req: AuthRequest, res: Response) => {
             total: total as any,
             notes: notes?.trim() || null,
             purchasedAt: purchasedAt ? new Date(purchasedAt) : new Date(),
+            productItemIds: availableItems.map((i: any) => i.id),
           },
         });
       });
@@ -488,7 +593,8 @@ export const addCustomerPurchase = async (req: AuthRequest, res: Response) => {
         tenantId: req.tenantId!,
         categoryId: inventoryCategoryId,
         categoryType: 'STOCK',
-        eventType: 'SOLD',
+        unitSystemId: availableItems[0]?.systemId ?? null,
+        eventType: 'DEPLOYED',
         delta: -quantity,
         title: `Sold ${quantity} unit(s) to customer`,
         performedBy: req.user?.id ?? null,
@@ -557,39 +663,45 @@ export const deleteCustomerPurchase = async (req: AuthRequest, res: Response) =>
 
     // ── Reverse stock if purchase was linked to an inventory category ─────
     if (purchase.inventoryCategoryId) {
-      await prisma.$transaction(async (tx: any) => {
-        // Find SOLD units from this category and return them to AVAILABLE
-        const soldItems = await tx.productItem.findMany({
-          where: {
-            tenantId: req.tenantId!,
-            categoryId: purchase.inventoryCategoryId,
-            stockStatus: 'SOLD',
-          },
-          select: { id: true },
-          take: purchase.quantity,
-          orderBy: { createdAt: 'asc' },
+      // Exact units this purchase claimed — recorded at purchase time. A
+      // purchase from before this field existed has none recorded; guessing
+      // by status would risk restoring a unit this purchase never actually
+      // touched (including one genuinely deployed to a project since), so
+      // that case skips stock reversal entirely rather than guess.
+      const unitIds: string[] = Array.isArray(purchase.productItemIds) ? purchase.productItemIds : [];
+      let restoredSystemId: string | null = null;
+      let restoredCount = 0;
+
+      if (unitIds.length > 0) {
+        await prisma.$transaction(async (tx: any) => {
+          const restored = await tx.productItem.findMany({
+            where: { id: { in: unitIds }, tenantId: req.tenantId!, stockStatus: 'DEPLOYED' },
+            select: { id: true, systemId: true },
+          });
+          if (restored.length > 0) {
+            await tx.productItem.updateMany({
+              where: { id: { in: restored.map((u: any) => u.id) } },
+              data: { stockStatus: 'AVAILABLE' },
+            });
+          }
+          restoredCount = restored.length;
+          restoredSystemId = restored[0]?.systemId ?? null;
+          await tx.customerPurchase.delete({ where: { id: purchaseId } });
         });
 
-        if (soldItems.length > 0) {
-          await tx.productItem.updateMany({
-            where: { id: { in: soldItems.map((i: any) => i.id) } },
-            data: { stockStatus: 'AVAILABLE' },
-          });
-        }
-
-        await tx.customerPurchase.delete({ where: { id: purchaseId } });
-      });
-
-      // Log stock reversal (fire-and-forget)
-      recordStockEvent({
-        tenantId: req.tenantId!,
-        categoryId: purchase.inventoryCategoryId,
-        categoryType: 'STOCK',
-        eventType: 'RETURNED',
-        delta: purchase.quantity,
-        title: `Reversed sale of ${purchase.quantity} unit(s) (purchase deleted)`,
-        performedBy: req.user?.id ?? null,
-      }).catch(() => {});
+        recordStockEvent({
+          tenantId: req.tenantId!,
+          categoryId: purchase.inventoryCategoryId,
+          categoryType: 'STOCK',
+          unitSystemId: restoredSystemId,
+          eventType: 'RETURNED',
+          delta: restoredCount,
+          title: `Reversed sale of ${restoredCount} unit(s) (purchase deleted)`,
+          performedBy: req.user?.id ?? null,
+        }).catch(() => {});
+      } else {
+        await (prisma as any).customerPurchase.delete({ where: { id: purchaseId } });
+      }
 
       void logAudit({
         tenantId: req.tenantId!,
@@ -600,11 +712,26 @@ export const deleteCustomerPurchase = async (req: AuthRequest, res: Response) =>
         entityType: 'CustomerPurchase',
         entityId: purchaseId,
         entityLabel: purchase.itemName,
-        details: { customerId: id, inventoryLinked: true, inventoryCategoryId: purchase.inventoryCategoryId },
+        details: {
+          customerId: id,
+          inventoryLinked: true,
+          inventoryCategoryId: purchase.inventoryCategoryId,
+          stockRestored: unitIds.length > 0,
+        },
         ...extractRequestContext(req),
       });
 
-      return res.json({ success: true, message: 'Purchase deleted successfully' });
+      return res.json({
+        success: true,
+        message:
+          unitIds.length > 0
+            ? 'Purchase deleted successfully'
+            : 'Purchase deleted. This purchase predates unit tracking, so stock could not be automatically restored — adjust inventory manually if needed.',
+        warning:
+          unitIds.length > 0
+            ? undefined
+            : 'No unit reference was recorded for this purchase; stock was not adjusted.',
+      });
     }
 
     await (prisma as any).customerPurchase.delete({ where: { id: purchaseId } });

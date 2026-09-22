@@ -353,6 +353,32 @@ export async function checkCustomerDependencies(
     });
   }
 
+  // Blocker: still owes money. Deleting the customer would strand that debt —
+  // nothing left to chase it against — so it must be settled or written off
+  // first, not silently lost.
+  const debtSales = await prisma.sale.findMany({
+    where: { customerId, tenantId, amountOwed: { gt: 0 } },
+    select: { id: true, saleNumber: true, amountOwed: true },
+    take: 5,
+  });
+  if (debtSales.length > 0) {
+    const totalOwed = debtSales.reduce((sum, s) => sum + Number(s.amountOwed), 0);
+    const totalCount = await prisma.sale.count({
+      where: { customerId, tenantId, amountOwed: { gt: 0 } },
+    });
+    deps.push({
+      module: 'Sales',
+      description: `This customer owes ${totalOwed.toLocaleString()} XAF across ${totalCount} sale(s)`,
+      count: totalCount,
+      action: 'Settle or write off the outstanding balance first',
+      links: debtSales.map(s => ({
+        id: s.id,
+        label: s.saleNumber,
+        route: `/sales/${s.id}`,
+      })),
+    });
+  }
+
   // Warning: payment invoices (preserved, not deleted)
   const paymentInvoiceCount = await (prisma as any).invoice.count({
     where: { customerId, tenantId, type: 'PAYMENT' },
@@ -546,5 +572,118 @@ export async function checkRoleDependencies(
     });
   }
 
+  return { canDelete: !isBlocked(deps), dependencies: deps };
+}
+
+// ── Product Variant ───────────────────────────────────────────────────────────
+
+/**
+ * Five tables can reference a variant, and only two of them (ProductItem via
+ * onDelete: Restrict, PriceRule) would be stopped by Postgres on its own.
+ * SaleItem and SaleReturnItem are SetNull and CategoryStockLog is Cascade —
+ * a raw DELETE would silently blank a historical sale's variant or erase its
+ * stock history. Every one is checked here so the answer does not depend on
+ * which table happened to be strictest.
+ */
+export async function checkProductVariantDependencies(
+  variantId: string,
+  tenantId: string,
+): Promise<DependencyReport> {
+  const deps: DependencyItem[] = [];
+
+  const [itemCount, priceRuleCount, saleItemCount, returnItemCount, stockLogCount] = await Promise.all([
+    (prisma as any).productItem.count({ where: { variantId, tenantId } }),
+    (prisma as any).priceRule.count({ where: { variantId } }),
+    (prisma as any).saleItem.count({ where: { variantId } }),
+    (prisma as any).saleReturnItem.count({ where: { variantId } }),
+    (prisma as any).categoryStockLog.count({ where: { variantId, tenantId } }),
+  ]);
+
+  if (itemCount > 0) {
+    deps.push({
+      module: 'Stock',
+      description: `${itemCount} stock unit${itemCount === 1 ? '' : 's'} still assigned to this variant`,
+      count: itemCount,
+      action: 'Reassign or remove those units first, or deactivate the variant instead.',
+    });
+  }
+  if (priceRuleCount > 0) {
+    deps.push({
+      module: 'Pricing',
+      description: `${priceRuleCount} price rule${priceRuleCount === 1 ? '' : 's'} set a price for this variant`,
+      count: priceRuleCount,
+      action: 'Remove those pricing tiers first, or deactivate the variant instead.',
+    });
+  }
+  if (saleItemCount > 0) {
+    deps.push({
+      module: 'Sales',
+      description: `Sold on ${saleItemCount} past sale${saleItemCount === 1 ? '' : 's'}`,
+      count: saleItemCount,
+      action: 'Deactivate instead — deleting would remove this option from completed sales.',
+    });
+  }
+  if (returnItemCount > 0) {
+    deps.push({
+      module: 'Returns',
+      description: `Recorded on ${returnItemCount} return${returnItemCount === 1 ? '' : 's'}`,
+      count: returnItemCount,
+      action: 'Deactivate instead — deleting would remove this option from return records.',
+    });
+  }
+  if (stockLogCount > 0) {
+    deps.push({
+      module: 'Stock history',
+      description: `${stockLogCount} stock movement${stockLogCount === 1 ? '' : 's'} recorded against it`,
+      count: stockLogCount,
+      action: 'Deactivate instead — deleting would erase this variant’s stock history.',
+    });
+  }
+
+  return { canDelete: !isBlocked(deps), dependencies: deps };
+}
+
+// ── Price List ────────────────────────────────────────────────────────────────
+
+/**
+ * Nothing blocks deleting a price list — the rows cascade and no sale depends
+ * on one. But customers assigned to it silently fall back to default pricing,
+ * which is a real pricing change nobody is told about. So this always allows
+ * the delete and reports the fallout as a warning instead.
+ */
+export async function checkPriceListDependencies(
+  tenantId: string,
+  priceListId: string,
+): Promise<DependencyReport> {
+  const priceList = await (prisma as any).priceList.findFirst({
+    where: { id: priceListId, tenantId },
+    include: { _count: { select: { customers: true, rules: true } } },
+  });
+  if (!priceList) return { canDelete: true, dependencies: [] };
+
+  const deps: DependencyItem[] = [];
+  const customers = priceList._count?.customers ?? 0;
+  const rules = priceList._count?.rules ?? 0;
+
+  if (customers > 0) {
+    deps.push({
+      module: 'Customers',
+      description: `${customers} customer${customers === 1 ? '' : 's'} on this list will move to default pricing`,
+      count: customers,
+      action: 'Reassign them to another price list first if they should keep negotiated rates.',
+      isWarning: true,
+    });
+  }
+  if (rules > 0) {
+    deps.push({
+      module: 'Pricing',
+      description: `${rules} pricing tier${rules === 1 ? '' : 's'} will be deleted with it`,
+      count: rules,
+      action: 'These cannot be recovered once the list is deleted.',
+      isWarning: true,
+    });
+  }
+
+  // Warnings only, so isBlocked() is false and the delete stays allowed.
   return { canDelete: !isBlocked(deps), dependencies: deps };
 }

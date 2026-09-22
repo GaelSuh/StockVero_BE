@@ -13,7 +13,21 @@ interface ReturnItemInput {
   productName: string;
   quantity: number;
   unitPrice: number;
+  /**
+   * Which option is coming back. Supplied by the caller from the original
+   * sale line — never guessed here. Null means the product has no variants.
+   */
+  variantId?: string | null;
 }
+
+/**
+ * Sold/returned tallies are kept per option, not per product: one sale can
+ * carry "Red / L" and "Blue / M" of the same product, and merging them lets a
+ * return of one exhaust the other's allowance. Mirrors the backend stockKey
+ * and the frontend cartLineKey.
+ */
+const lineKey = (categoryId: string, variantId?: string | null) =>
+  `${categoryId}::${variantId ?? ''}`;
 
 /** Goods handed over in place of what came back. */
 interface ExchangeItemInput extends ReturnItemInput {
@@ -63,11 +77,18 @@ export async function processReturn(
       // Without this a return could refund money and create stock out of thin
       // air: there was no check at all against what the sale actually contained.
       const soldByCategory = new Map<string, number>();
+      // The price a return refunds at is what this sale actually charged —
+      // never whatever the request claims. Without this, `input.items[].unitPrice`
+      // went straight into refundAmount unchecked: a caller could return one
+      // unit of a 500 XAF item at a self-declared "unitPrice" of 5,000,000 and
+      // walk away with a refund the sale never earned.
+      const soldUnitPriceByCategory = new Map<string, number>();
       for (const line of sale.items) {
-        soldByCategory.set(
-          line.categoryId,
-          (soldByCategory.get(line.categoryId) ?? 0) + line.quantity,
-        );
+        const key = lineKey(line.categoryId, (line as any).variantId);
+        soldByCategory.set(key, (soldByCategory.get(key) ?? 0) + line.quantity);
+        if (!soldUnitPriceByCategory.has(key)) {
+          soldUnitPriceByCategory.set(key, Number(line.unitPrice));
+        }
       }
 
       const priorReturns = await (tx as any).saleReturn.findMany({
@@ -77,10 +98,8 @@ export async function processReturn(
       const alreadyReturned = new Map<string, number>();
       for (const r of priorReturns) {
         for (const line of r.items) {
-          alreadyReturned.set(
-            line.categoryId,
-            (alreadyReturned.get(line.categoryId) ?? 0) + line.quantity,
-          );
+          const key = lineKey(line.categoryId, line.variantId);
+          alreadyReturned.set(key, (alreadyReturned.get(key) ?? 0) + line.quantity);
         }
       }
 
@@ -90,13 +109,14 @@ export async function processReturn(
             `Return quantity for ${item.productName} must be at least 1.`,
           );
         }
-        const sold = soldByCategory.get(item.categoryId) ?? 0;
+        const key = lineKey(item.categoryId, item.variantId);
+        const sold = soldByCategory.get(key) ?? 0;
         if (sold === 0) {
           throw new ReturnValidationError(
             `${item.productName} was not part of sale ${sale.saleNumber}.`,
           );
         }
-        const returnable = sold - (alreadyReturned.get(item.categoryId) ?? 0);
+        const returnable = sold - (alreadyReturned.get(key) ?? 0);
         if (item.quantity > returnable) {
           throw new ReturnValidationError(
             `Cannot return ${item.quantity} of ${item.productName}: ${sold} sold, ` +
@@ -105,8 +125,18 @@ export async function processReturn(
         }
       }
 
+      // Overwrite whatever price the request carried with what the sale
+      // actually charged, for every remaining calculation and record below —
+      // one substitution here rather than a second check duplicated at each
+      // place `unitPrice` gets used.
+      const trustedItems = input.items.map((item) => ({
+        ...item,
+        unitPrice:
+          soldUnitPriceByCategory.get(lineKey(item.categoryId, item.variantId)) ?? item.unitPrice,
+      }));
+
       const returnNumber = await getNextReturnNumber(tenantId, tx);
-      const refundAmount = input.items.reduce(
+      const refundAmount = trustedItems.reduce(
         (sum, item) => sum + item.unitPrice * item.quantity,
         0,
       );
@@ -157,6 +187,10 @@ export async function processReturn(
                 quantity: i.quantity,
                 discountAmount: 0,
                 lineTotal: i.unitPrice * i.quantity,
+                // The replacement is a real sale, so its lines have to record
+                // which option went out — otherwise returning the replacement
+                // later hits the same ambiguity this pass just closed.
+                variantId: (i as any).variantId ?? null,
               })),
             },
             // Only the difference is fresh money; the rest is paid for by the
@@ -187,6 +221,10 @@ export async function processReturn(
             categoryId: i.categoryId,
             productName: i.productName,
             quantity: i.quantity,
+            // Replacement goods are a fresh sale, so the variant comes from
+            // the exchange request, not the returned line. Null until the
+            // exchange UI sends one — same behaviour as before variants.
+            variantId: (i as any).variantId ?? null,
           })) as any,
           replacementNumber,
           tenantId,
@@ -213,20 +251,62 @@ export async function processReturn(
           processedByName: input.processedByName,
           exchangeSaleId,
           items: {
-            create: input.items.map((item) => ({
+            create: trustedItems.map((item) => ({
               categoryId: item.categoryId,
               productName: item.productName,
               quantity: item.quantity,
               unitPrice: item.unitPrice,
+              // Straight from the validated request item — the caller names
+              // which option came back, rather than it being guessed from the
+              // sale's first matching line.
+              variantId: item.variantId ?? null,
             })),
           },
         },
         include: { items: true },
       });
 
-      await restoreStockForReturn(
+      // Which exact units to give back — resolved from this sale's own line
+      // items, never guessed. Narrowed to units still DEPLOYED *before*
+      // slicing to quantity, so an earlier partial return (which flipped its
+      // unit back to AVAILABLE already) is skipped over rather than
+      // re-counted here and starving a still-deployed unit of its turn.
+      const candidateIds = [
+        ...new Set(sale.items.filter((si: any) => si.productItemId).map((si: any) => si.productItemId as string)),
+      ];
+      const stillDeployed = candidateIds.length
+        ? new Set(
+            (
+              await (tx as any).productItem.findMany({
+                where: { id: { in: candidateIds }, tenantId, stockStatus: 'DEPLOYED' },
+                select: { id: true },
+              })
+            ).map((u: any) => u.id),
+          )
+        : new Set<string>();
+
+      const restoreItems = input.items.map((item) => {
+        const unitIds = sale.items
+          .filter(
+            (si: any) =>
+              si.categoryId === item.categoryId &&
+              // Matched on the option too, so restoring "Red / L" cannot hand
+              // back a unit from "Blue / M"'s pool.
+              (si.variantId ?? null) === (item.variantId ?? null) &&
+              si.productItemId &&
+              stillDeployed.has(si.productItemId),
+          )
+          .map((si: any) => si.productItemId as string)
+          .slice(0, item.quantity);
+        // Restock has to land on the same variant the sale took it from —
+        // for a QUANTITY product that means the variant's own counter, not
+        // the parent category's.
+        return { ...item, unitIds, variantId: item.variantId ?? null };
+      });
+
+      const restoreResult = await restoreStockForReturn(
         tx,
-        input.items,
+        restoreItems,
         returnNumber,
         tenantId,
         input.processedById,
@@ -293,6 +373,7 @@ export async function processReturn(
         priceDifference: exchangeTotal - refundAmount,
         debtReduced,
         cashRefunded,
+        stockRestorationSkipped: restoreResult.skipped,
       };
     },
     // Restoring stock, raising a replacement sale and settling money is more

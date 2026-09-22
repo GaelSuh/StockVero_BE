@@ -10,6 +10,8 @@ import {
   getCreditCustomersController,
   resolvePricesController,
   cloneSaleController,
+  lookupRetailSaleByCode,
+  lookupWholesaleSaleByCode,
 } from '../controllers/sales.controller.js';
 
 const router = Router();
@@ -20,6 +22,7 @@ router.use(tenantGuard, mustChangePasswordGuard);
 const retailRouter = Router();
 retailRouter.use(moduleGuard('retail_sales'));
 retailRouter.get('/retail', permissionGuard('retail_sales', 'canRead'), listSales);
+retailRouter.get('/retail/lookup/:code', permissionGuard('retail_sales', 'canRead'), lookupRetailSaleByCode);
 retailRouter.get('/retail/:id', permissionGuard('retail_sales', 'canRead'), getSale);
 retailRouter.post('/retail', permissionGuard('retail_sales', 'canCreate'), createSale);
 retailRouter.patch('/retail/:id', permissionGuard('retail_sales', 'canUpdate'), updateSale);
@@ -32,6 +35,7 @@ retailRouter.get('/retail/credit/customers', permissionGuard('retail_sales', 'ca
 const wholesaleRouter = Router();
 wholesaleRouter.use(moduleGuard('wholesale_sales'));
 wholesaleRouter.get('/wholesale', permissionGuard('wholesale_sales', 'canRead'), listSales);
+wholesaleRouter.get('/wholesale/lookup/:code', permissionGuard('wholesale_sales', 'canRead'), lookupWholesaleSaleByCode);
 wholesaleRouter.get('/wholesale/:id', permissionGuard('wholesale_sales', 'canRead'), getSale);
 wholesaleRouter.post('/wholesale', permissionGuard('wholesale_sales', 'canCreate'), createSale);
 wholesaleRouter.patch('/wholesale/:id', permissionGuard('wholesale_sales', 'canUpdate'), updateSale);

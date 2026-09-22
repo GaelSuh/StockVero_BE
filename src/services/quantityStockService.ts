@@ -67,6 +67,13 @@ export interface AddQuantityStockParams {
   note?: string;
   /** Device-generated id, when this movement was recorded offline. */
   offlineId?: string;
+  /**
+   * Which option the stock is for. Credits that variant's own counter instead
+   * of the parent product's — the same "variant if present, else the parent"
+   * split deductStockForSale and availableFor already make. Null/absent keeps
+   * the original category-level behaviour exactly.
+   */
+  variantId?: string | null;
 }
 
 /**
@@ -84,6 +91,7 @@ export async function addQuantityStock({
   categoryName,
   note,
   offlineId,
+  variantId,
 }: AddQuantityStockParams): Promise<void> {
   if (quantityAdded <= 0) return;
 
@@ -96,23 +104,55 @@ export async function addQuantityStock({
     if (already) return;
   }
 
+  // The variant arrives from a device payload, so it is checked rather than
+  // trusted: one belonging to another product (or another tenant) would credit
+  // stock to an option this product does not sell, where no stock read would
+  // ever find it again.
+  let variant: { id: string; label: string; quantityOnHand: number } | null = null;
+  if (variantId) {
+    variant = await (tx as any).productVariant.findFirst({
+      where: { id: variantId, tenantId, categoryId },
+      select: { id: true, label: true, quantityOnHand: true },
+    });
+    if (!variant) {
+      throw new Error('That variant does not belong to this product.');
+    }
+  }
+
+  // Only one of the two counters moves. A variant's stock is its own; adding
+  // to the parent as well would double-count the same delivery.
   const updated = await (tx as any).inventoryCategory.update({
     where: { id: categoryId },
-    data: { quantityOnHand: { increment: quantityAdded } },
+    data: variant ? {} : { quantityOnHand: { increment: quantityAdded } },
     select: { id: true, name: true, quantityOnHand: true },
   });
+
+  let stockAfter = updated.quantityOnHand;
+  if (variant) {
+    const updatedVariant = await (tx as any).productVariant.update({
+      where: { id: variant.id },
+      data: { quantityOnHand: { increment: quantityAdded } },
+      select: { quantityOnHand: true },
+    });
+    stockAfter = updatedVariant.quantityOnHand;
+  }
+
+  const label = variant ? `${updated.name} (${variant.label})` : updated.name;
 
   await (tx as any).categoryStockLog.create({
     data: {
       tenantId,
       categoryId,
+      // So the product's stock history shows which option each delivery was
+      // for, rather than a run of identical-looking rows.
+      variantId: variant?.id ?? null,
       eventType: isNewPurchase ? 'STOCK_PURCHASE' : 'OPENING_STOCK',
-      stockBefore: updated.quantityOnHand - quantityAdded,
-      stockAfter: updated.quantityOnHand,
+      stockBefore: stockAfter - quantityAdded,
+      stockAfter,
       delta: quantityAdded,
       title: isNewPurchase
-        ? `Stock purchased — ${quantityAdded} unit(s)`
-        : `Opening stock recorded — ${quantityAdded} unit(s)`,
+        ? `Stock purchased — ${quantityAdded} unit(s)${variant ? ` · ${variant.label}` : ''}`
+        : `Opening stock recorded — ${quantityAdded} unit(s)${variant ? ` · ${variant.label}` : ''}`,
       notes: note ?? null,
       offlineId: offlineId ?? null,
     },
@@ -123,7 +163,9 @@ export async function addQuantityStock({
   await recordQuantityStockExpense(tx, {
     tenantId,
     categoryId,
-    categoryName: categoryName ?? updated.name,
+    // The expense is against the product — money does not belong to an option
+    // — but the name says which one was bought so the ledger line is readable.
+    categoryName: categoryName ?? label,
     amount: costPrice * quantityAdded,
     quantity: quantityAdded,
     note,

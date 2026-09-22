@@ -3,9 +3,9 @@ import { prisma } from '../db.js';
 import { resolvePersonName, backfillPersonName } from '../lib/personName.js';
 import { AuthRequest } from '../types/index.js';
 import { getNextSaleNumber } from '../services/saleService.js';
-import { recordSaleAsIncome } from '../services/saleFinanceService.js';
-import { deductStockForSale, validateStockAvailability } from '../services/saleInventoryService.js';
-import { resolvePrice, resolvePriceDetailed } from '../services/priceResolutionService.js';
+import { recordSaleAsIncome, recordSaleTipAsIncome } from '../services/saleFinanceService.js';
+import { deductStockForSale, validateStockAvailability, InsufficientStockError } from '../services/saleInventoryService.js';
+import { resolvePricesForSale } from '../services/priceResolutionService.js';
 import { findOrCreateCreditCustomer } from '../services/creditCustomerService.js';
 
 /**
@@ -66,37 +66,12 @@ export async function createSale(req: AuthRequest, res: Response) {
       });
     }
 
-    // One read for the whole cart. Quantities are summed per product first, so a
-    // cart holding two serialised units of the same model is checked against the
-    // total it actually needs rather than one line at a time.
-    const requestedByCategory = new Map<string, number>();
-    for (const item of items) {
-      requestedByCategory.set(
-        item.categoryId,
-        (requestedByCategory.get(item.categoryId) ?? 0) + item.quantity,
-      );
-    }
-    const stockRows = await prisma.inventoryCategory.findMany({
-      where: { tenantId, id: { in: [...requestedByCategory.keys()] } },
-      select: {
-        id: true,
-        name: true,
-        plannedQty: true,
-        quantityOnHand: true,
-        stockTrackingMode: true,
-      },
-    });
-    for (const row of stockRows) {
-      const requested = requestedByCategory.get(row.id) ?? 0;
-      const currentStock =
-        row.stockTrackingMode === 'QUANTITY' ? row.quantityOnHand : row.plannedQty;
-      if (currentStock < requested) {
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient stock for "${row.name}". Available: ${currentStock}, Requested: ${requested}`,
-        });
-      }
-    }
+    // Stock is checked once, inside the transaction below, by
+    // deductStockForSale — the same function that actually deducts it. A
+    // second check here duplicated that logic against `plannedQty` (an
+    // invoice-authorised quantity, not live stock), which is exactly how a
+    // serialized product with zero physical units left could still be sold:
+    // this check passed against a stale number while the real count said no.
 
     // A sale created offline carries the id the device generated for it. If the
     // response to an earlier attempt never arrived, the retry lands here and gets
@@ -124,13 +99,54 @@ export async function createSale(req: AuthRequest, res: Response) {
     const sale = await prisma.$transaction(async (tx: any) => {
       const saleNumber = await getNextSaleNumber(tenantId, tx);
 
+      const priceLines = items.map((item: any) => ({
+        categoryId: item.categoryId,
+        quantity: item.quantity,
+        variantId: item.variantId || null,
+      }));
+      // tx, not the global client — this read is now part of the same
+      // transaction as the writes below it.
+      const resolvedPrices = await resolvePricesForSale(tenantId, customerId || null, priceLines, tx);
+
+      // An offline-synced sale already happened before this request existed:
+      // cash changed hands and a receipt printed at whatever price the device
+      // had cached. Overriding it now prevents nothing — it only makes our
+      // record disagree with what the customer was actually charged. So an
+      // offline sale keeps the device's price, bounded by a tolerance that
+      // still catches gross tampering or a badly stale cache.
+      //
+      // A fresh online sale (no offlineId) has no such history to respect, so
+      // it is always the server-resolved price with no exception — that is
+      // where the original "trust the client's unitPrice" gap actually lived,
+      // and it stays fully closed here.
+      const OFFLINE_PRICE_TOLERANCE = 0.2; // 20% — starting point, tune to the business
+
       let subtotal = 0;
       const saleItems: any[] = [];
-      for (const item of items) {
-        let unitPrice = item.unitPrice;
-        if (mode === 'WHOLESALE' && customerId) {
-          unitPrice = await resolvePrice(tenantId, item.categoryId, customerId, item.quantity);
+      for (let idx = 0; idx < items.length; idx++) {
+        const item = items[idx];
+        const resolved = resolvedPrices[idx];
+        let unitPrice = resolved.unitPrice;
+
+        if (offlineId) {
+          const clientPrice = Number(item.unitPrice);
+          if (Number.isFinite(clientPrice) && clientPrice >= 0) {
+            const deviation = resolved.unitPrice > 0
+              ? Math.abs(clientPrice - resolved.unitPrice) / resolved.unitPrice
+              : (clientPrice === 0 ? 0 : Infinity);
+            if (deviation <= OFFLINE_PRICE_TOLERANCE) {
+              unitPrice = clientPrice;
+            } else {
+              console.warn(
+                `[offline-sale] Price deviation beyond tolerance — tenant ${tenantId}, offlineId ${offlineId}, ` +
+                `category ${item.categoryId}, variant ${item.variantId ?? 'none'}: device charged ${clientPrice}, ` +
+                `server resolves ${resolved.unitPrice} (${(deviation * 100).toFixed(0)}% off). Using server price.`,
+              );
+              // unitPrice stays resolved.unitPrice.
+            }
+          }
         }
+
         const itemDiscount = item.discountType === 'PERCENTAGE'
           ? (unitPrice * item.quantity * (item.discountValue || 0)) / 100
           : (item.discountValue || 0);
@@ -148,8 +164,19 @@ export async function createSale(req: AuthRequest, res: Response) {
           lineTotal,
           batchNumber: item.batchNumber || null,
           lotNumber: item.lotNumber || null,
+          // Not claimed yet — deductStockForSale below does that
+          // atomically and only stamps productItemId once the claim actually
+          // succeeds, so the receipt shows the serial that really left the
+          // shop rather than just the one that was requested.
+          serialNumber: item.unitIdentifier || null,
+          variantId: item.variantId || null,
+          variantLabel: resolved.variantLabel ?? null,
         });
       }
+      // Parallel to saleItems — the unit each line asked for, kept separate
+      // from the Prisma create payload (productItemId is set only after the
+      // claim succeeds, patched in once deductStockForSale returns).
+      const requestedUnitIds: (string | null)[] = items.map((item: any) => item.unitId || null);
 
       const saleDiscountAmount = discountType === 'PERCENTAGE'
         ? (subtotal * (discountValue || 0)) / 100
@@ -165,7 +192,14 @@ export async function createSale(req: AuthRequest, res: Response) {
         (p: any) => String(p.method).toUpperCase() !== CREDIT_MARKER,
       );
 
-      const totalPaid = settledPayments.reduce((sum: number, p: any) => sum + p.amount, 0);
+      // Cash tendered can legitimately exceed the total (change owed at the
+      // till), and split payments can overshoot by mistake. Either way, the sale
+      // itself is never "paid" for more than it is worth — anything past the
+      // total is carved off as a tip for whoever made the sale, tracked
+      // separately (see recordSaleTipAsIncome) rather than inflating amountPaid.
+      const rawTotalPaid = settledPayments.reduce((sum: number, p: any) => sum + p.amount, 0);
+      const totalPaid = Math.min(rawTotalPaid, totalAmount);
+      const tipAmount = Math.max(0, rawTotalPaid - totalAmount);
       const amountOwed = Math.max(0, totalAmount - totalPaid);
       let paymentStatus: 'PAID' | 'PARTIAL' | 'CREDIT' = 'PAID';
       if (totalPaid <= 0) paymentStatus = 'CREDIT';
@@ -213,6 +247,7 @@ export async function createSale(req: AuthRequest, res: Response) {
           paymentStatus,
           amountPaid: totalPaid,
           amountOwed,
+          tipAmount,
           creditDueDate: creditDueDate ? new Date(creditDueDate) : null,
           creditCollateral: creditContact?.collateral?.trim() || null,
           notes: notes || null,
@@ -231,21 +266,44 @@ export async function createSale(req: AuthRequest, res: Response) {
       });
 
       // The server checks stock at this moment rather than trusting whatever the
-      // device last saw. Anything oversold is reported, never rejected.
-      const stockConflicts = await deductStockForSale(
+      // device last saw. Insufficient stock throws and rolls back the whole sale.
+      const { soldUnitIds } = await deductStockForSale(
         tx,
-        saleItems.map((i: any) => ({ categoryId: i.categoryId, quantity: i.quantity, productName: i.productName })),
+        saleItems.map((i: any, idx: number) => ({
+          categoryId: i.categoryId,
+          quantity: i.quantity,
+          productName: i.productName,
+          unitId: requestedUnitIds[idx],
+          // Same server-resolved variant the line was priced against — stock
+          // must come out of the bucket the customer was actually charged for.
+          variantId: i.variantId ?? null,
+        })),
         saleNumber,
         tenantId,
         user.id,
       );
 
+      // createdSale.items is in the same order the nested create was given.
+      // Only lines that actually claimed a unit get a productItemId — a serial
+      // conflict (already sold) leaves it null rather than pointing at a unit
+      // this line never actually took.
+      for (let idx = 0; idx < createdSale.items.length; idx++) {
+        const claimedUnitId = soldUnitIds[idx];
+        if (claimedUnitId) {
+          await tx.saleItem.update({
+            where: { id: createdSale.items[idx].id },
+            data: { productItemId: claimedUnitId },
+          });
+        }
+      }
+
       // The income transaction is written after the sale because it references
       // the sale number, which costs one extra update to link them back up.
       const transactionId = await recordSaleAsIncome(tx, createdSale, tenantId);
       await tx.sale.update({ where: { id: createdSale.id }, data: { transactionId } });
+      await recordSaleTipAsIncome(tx, createdSale, tipAmount, tenantId);
 
-      return { ...createdSale, transactionId, stockConflicts };
+      return { ...createdSale, transactionId };
     },
     {
       // A sale is a dozen or so sequential writes, and the database is a managed
@@ -256,26 +314,19 @@ export async function createSale(req: AuthRequest, res: Response) {
       maxWait: 10_000,
     });
 
-    const { stockConflicts, ...saleData } = sale as any;
     return res.status(201).json({
       success: true,
       message: 'Sale created',
-      data: {
-        ...saleData,
-        // Present only when the sale went past the recorded stock, so a device
-        // syncing offline sales can show the owner what needs recounting.
-        conflict: stockConflicts?.length
-          ? {
-              type: 'STOCK_OVERSOLD',
-              message: `Sold more than the recorded stock of ${stockConflicts
-                .map((c: any) => c.productName)
-                .join(', ')}. The sale was kept — please recount.`,
-              details: stockConflicts,
-            }
-          : undefined,
-      },
+      data: sale,
     });
   } catch (error) {
+    if (error instanceof InsufficientStockError) {
+      return res.status(400).json({
+        success: false,
+        message: error.message,
+        conflict: { type: 'INSUFFICIENT_STOCK', items: error.items },
+      });
+    }
     console.error('Error creating sale:', error);
     return res.status(500).json({
       success: false,
@@ -342,7 +393,16 @@ export async function getSale(req: AuthRequest, res: Response) {
     const sale = await prisma.sale.findFirst({
       where: { id: req.params.id, tenantId: req.tenantId! },
       include: {
-        items: { include: { category: { select: { id: true, name: true, sku: true, imageUrl: true } } } },
+        items: {
+          include: {
+            category: { select: { id: true, name: true, sku: true, imageUrl: true, unit: true, stockTrackingMode: true } },
+            // Without this a return has no way to know — or show — which
+            // option a line was. sku/barcode come along so a return can be
+            // scanned straight onto the right line when one sale holds two
+            // options of the same product.
+            variant: { select: { id: true, label: true, sku: true, barcode: true } },
+          },
+        },
         payments: true,
         returns: { include: { items: true } },
         customer: true,
@@ -374,6 +434,37 @@ export async function getSale(req: AuthRequest, res: Response) {
     return res.status(500).json({ success: false, message: 'Failed to get sale' });
   }
 }
+
+/**
+ * Resolves a scanned receipt barcode to the sale it belongs to, for the
+ * Returns screen. Looked up by `id` (the value printed on a receipt once
+ * synced) or `offlineId` (what got printed if the receipt came off the
+ * device before it ever reached the server) — always scoped to this tenant,
+ * so a code from another tenant's receipt can never resolve here even if it
+ * were somehow guessed or misscanned.
+ */
+function lookupSaleByCode(mode: 'RETAIL' | 'WHOLESALE') {
+  return async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantId = req.tenantId!;
+      const code = String(req.params.code || '').trim();
+      if (!code) return res.status(400).json({ success: false, message: 'A code is required' });
+
+      const sale = await prisma.sale.findFirst({
+        where: { tenantId, mode, OR: [{ id: code }, { offlineId: code }] },
+        select: { id: true, saleNumber: true, mode: true },
+      });
+      if (!sale) return res.status(404).json({ success: false, message: 'No sale found for this code' });
+
+      return res.json({ success: true, data: sale });
+    } catch (error) {
+      return res.status(500).json({ success: false, message: 'Failed to look up sale' });
+    }
+  };
+}
+
+export const lookupRetailSaleByCode = lookupSaleByCode('RETAIL');
+export const lookupWholesaleSaleByCode = lookupSaleByCode('WHOLESALE');
 
 export async function updateSale(req: AuthRequest, res: Response) {
   try {
@@ -407,19 +498,29 @@ export async function updateSale(req: AuthRequest, res: Response) {
     if (items?.length) {
       await prisma.saleItem.deleteMany({ where: { saleId } });
 
-      let subtotal = 0;
-      const newItems = items.map((item: any) => {
+      const effectiveCustomerId = customerId !== undefined ? (customerId || null) : existing.customerId;
+      const priceLines = items.map((item: any) => ({
+        categoryId: item.categoryId,
+        quantity: item.quantity,
+        variantId: item.variantId || null,
+      }));
+      // Always server-resolved: this is an explicit later edit, never an
+      // offline sync, so there is no already-happened sale to respect.
+      const resolvedPrices = await resolvePricesForSale(tenantId, effectiveCustomerId, priceLines);
+
+      const newItems = items.map((item: any, idx: number) => {
+        const resolved = resolvedPrices[idx];
+        const unitPrice = resolved.unitPrice;
         const itemDiscount = item.discountType === 'PERCENTAGE'
-          ? (item.unitPrice * item.quantity * (item.discountValue || 0)) / 100
+          ? (unitPrice * item.quantity * (item.discountValue || 0)) / 100
           : (item.discountValue || 0);
-        const lineTotal = item.unitPrice * item.quantity - itemDiscount;
-        subtotal += lineTotal;
+        const lineTotal = unitPrice * item.quantity - itemDiscount;
         return {
           saleId,
           categoryId: item.categoryId,
           productName: item.productName,
           sku: item.sku || null,
-          unitPrice: item.unitPrice,
+          unitPrice,
           quantity: item.quantity,
           discountType: item.discountType || null,
           discountValue: item.discountValue || null,
@@ -427,9 +528,12 @@ export async function updateSale(req: AuthRequest, res: Response) {
           lineTotal,
           batchNumber: item.batchNumber || null,
           lotNumber: item.lotNumber || null,
+          variantId: item.variantId || null,
+          variantLabel: resolved.variantLabel ?? null,
         };
       });
 
+      const subtotal = newItems.reduce((sum: number, i: any) => sum + i.lineTotal, 0);
       await prisma.saleItem.createMany({ data: newItems });
 
       const saleDiscountAmount = (discountType ?? existing.discountType) === 'PERCENTAGE'
@@ -443,6 +547,7 @@ export async function updateSale(req: AuthRequest, res: Response) {
       updateData.amountOwed = Math.max(0, totalAmount - Number(existing.amountPaid));
       if (updateData.amountOwed <= 0) updateData.paymentStatus = 'PAID';
       else if (Number(existing.amountPaid) > 0) updateData.paymentStatus = 'PARTIAL';
+      else updateData.paymentStatus = 'CREDIT';
     }
 
     if (discountType !== undefined) updateData.discountType = discountType || null;
@@ -479,17 +584,21 @@ export async function addPaymentToSale(req: AuthRequest, res: Response) {
       return res.status(400).json({ success: false, message: 'Sale is already fully paid' });
     }
 
+    // Same "overpayment becomes a tip" rule as createSale: the sale never shows
+    // as paid for more than it is worth, and the excess is not silently dropped.
     const paymentAmount = Math.min(amount, Number(sale.amountOwed));
+    const tipAmount = Math.max(0, amount - Number(sale.amountOwed));
     const newAmountPaid = Number(sale.amountPaid) + paymentAmount;
     const newAmountOwed = Number(sale.totalAmount) - newAmountPaid;
     const newStatus = newAmountOwed <= 0 ? 'PAID' : 'PARTIAL';
+    const newTipAmount = Number((sale as any).tipAmount ?? 0) + tipAmount;
 
     await prisma.$transaction(async (tx: any) => {
       await tx.salePayment.create({
         data: {
           saleId: sale.id,
           method,
-          amount: paymentAmount,
+          amount,
           reference: reference || null,
           recordedById: user.id,
           recordedByName: user.email,
@@ -498,11 +607,27 @@ export async function addPaymentToSale(req: AuthRequest, res: Response) {
 
       await tx.sale.update({
         where: { id: sale.id },
-        data: { amountPaid: newAmountPaid, amountOwed: Math.max(0, newAmountOwed), paymentStatus: newStatus },
+        data: {
+          amountPaid: newAmountPaid,
+          amountOwed: Math.max(0, newAmountOwed),
+          paymentStatus: newStatus,
+          tipAmount: newTipAmount,
+        },
       });
+
+      await recordSaleTipAsIncome(tx, sale as any, tipAmount, tenantId);
     });
 
-    return res.json({ success: true, message: 'Payment recorded', data: { amountPaid: newAmountPaid, amountOwed: Math.max(0, newAmountOwed), paymentStatus: newStatus } });
+    return res.json({
+      success: true,
+      message: 'Payment recorded',
+      data: {
+        amountPaid: newAmountPaid,
+        amountOwed: Math.max(0, newAmountOwed),
+        paymentStatus: newStatus,
+        tipAmount: tipAmount > 0 ? tipAmount : undefined,
+      },
+    });
   } catch (error) {
     return res.status(500).json({ success: false, message: 'Failed to record payment' });
   }
@@ -555,26 +680,29 @@ export async function resolvePricesController(req: AuthRequest, res: Response) {
       return res.status(400).json({ success: false, message: 'Items are required' });
     }
 
-    const resolved = await Promise.all(
-      items.map(async (item: { categoryId: string; quantity: number }) => {
-        const resolved = await resolvePriceDetailed(
-          tenantId,
-          item.categoryId,
-          customerId || null,
-          item.quantity || 1,
-        );
-        return {
-          categoryId: item.categoryId,
-          unitPrice: resolved.unitPrice,
-          // Lets the cart say *why* a price changed rather than silently
-          // rewriting the number under the cashier.
-          source: resolved.source,
-          priceListName: resolved.priceListName ?? null,
-        };
-      }),
-    );
+    // Must thread variantId: this endpoint is what the cart previews, and
+    // createSale resolves the same six tiers with the variant included.
+    // Leaving it out would quote the product price and then charge the
+    // variant price at checkout.
+    const lines = items.map((item: any) => ({
+      categoryId: item.categoryId,
+      quantity: item.quantity || 1,
+      variantId: item.variantId || null,
+    }));
+    const resolved = await resolvePricesForSale(tenantId, customerId || null, lines);
 
-    return res.json({ success: true, data: resolved });
+    const data = items.map((item: any, idx: number) => ({
+      categoryId: item.categoryId,
+      variantId: item.variantId || null,
+      unitPrice: resolved[idx].unitPrice,
+      // Lets the cart say *why* a price changed rather than silently
+      // rewriting the number under the cashier.
+      source: resolved[idx].source,
+      priceListName: resolved[idx].priceListName ?? null,
+      variantLabel: resolved[idx].variantLabel ?? null,
+    }));
+
+    return res.json({ success: true, data });
   } catch (error) {
     return res.status(500).json({ success: false, message: 'Failed to resolve prices' });
   }

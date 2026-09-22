@@ -8,7 +8,7 @@ type PrismaWriteClient =
 
 export async function recordSaleAsIncome(
   tx: PrismaWriteClient,
-  sale: { id: string; saleNumber: string; totalAmount: any; mode: string; createdAt: Date },
+  sale: { id: string; saleNumber: string; totalAmount: any; mode: string; createdAt: Date; customerId?: string | null },
   tenantId: string,
 ): Promise<string> {
   const amount = Number(sale.totalAmount);
@@ -24,6 +24,10 @@ export async function recordSaleAsIncome(
       category: sale.mode === 'RETAIL' ? 'Retail Sale' : 'Wholesale Sale',
       moduleRef: sale.mode === 'RETAIL' ? 'retail_sales' : 'wholesale_sales',
       entityId: sale.id,
+      // Without this, a sale's income transaction was findable by sale id
+      // but not by customer — the Finance tab on a customer's own page had
+      // no way to show money tied to them at all.
+      customerId: sale.customerId ?? null,
       isAutomatic: true,
       recordedAt: sale.createdAt,
     },
@@ -32,6 +36,39 @@ export async function recordSaleAsIncome(
   await recordIncome(tenantId, amount, tx);
 
   return transaction.id;
+}
+
+/**
+ * Records a tip (money tendered beyond the sale total, per the shop's
+ * "overpayment becomes a tip for the seller" policy) as its own income
+ * transaction, so it shows up in reporting instead of being silently absorbed
+ * into the sale total.
+ */
+export async function recordSaleTipAsIncome(
+  tx: PrismaWriteClient,
+  sale: { id: string; saleNumber: string; soldByName: string },
+  tipAmount: number,
+  tenantId: string,
+): Promise<void> {
+  if (tipAmount <= 0) return;
+
+  await (tx as any).transaction.create({
+    data: {
+      tenantId,
+      type: 'INCOME',
+      status: 'ACCEPTED',
+      amount: tipAmount,
+      currency: 'XAF',
+      description: `Tip on Sale #${sale.saleNumber} (${sale.soldByName})`,
+      category: 'Tip',
+      moduleRef: 'retail_sales',
+      entityId: sale.id,
+      isAutomatic: true,
+      recordedAt: new Date(),
+    },
+  });
+
+  await recordIncome(tenantId, tipAmount, tx);
 }
 
 export async function recordReturnAsExpense(

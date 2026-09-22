@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { AuthRequest } from '../types/index.js';
 import { processReturn, ReturnValidationError } from '../services/returnService.js';
+import { InsufficientStockError } from '../services/saleInventoryService.js';
 import { prisma } from '../db.js';
 
 export async function createReturn(req: AuthRequest, res: Response) {
@@ -37,12 +38,24 @@ export async function createReturn(req: AuthRequest, res: Response) {
       processedByName,
     });
 
-    return res.status(201).json({ success: true, message: 'Return processed', data: result });
+    const skipped = (result as any).stockRestorationSkipped as Array<{ productName: string }> | undefined;
+    return res.status(201).json({
+      success: true,
+      message: 'Return processed',
+      data: result,
+      // The return itself always succeeds — refund/exchange settlement never
+      // depends on this — but if a line had no unit reference to restore
+      // against (a sale from before units were tracked per line), the till
+      // needs to know stock wasn't auto-adjusted for it.
+      warning: skipped?.length
+        ? `Stock was not automatically restored for: ${skipped.map((s) => s.productName).join(', ')}. Adjust inventory manually if needed.`
+        : undefined,
+    });
   } catch (error) {
     console.error('Error processing return:', error);
     // A return of more than was sold is the caller's mistake, not a server
     // fault — it needs to reach the till as a readable message.
-    if (error instanceof ReturnValidationError) {
+    if (error instanceof ReturnValidationError || error instanceof InsufficientStockError) {
       return res.status(400).json({ success: false, message: error.message });
     }
     return res.status(500).json({
