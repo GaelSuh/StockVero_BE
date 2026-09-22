@@ -6,7 +6,7 @@ import { AuthRequest } from '../types/index.js';
 import { createProjectInvoice } from '../services/invoiceService.js';
 import { sendNotification, broadcastToModule } from '../services/notificationService.js';
 import { getProjectAccessRecipients } from '../utils/projectRecipients.js';
-import { checkSufficientFunds, recordExpense, reverseExpense } from '../services/balanceService.js';
+import { checkSufficientFunds, recordExpense, reverseExpense, InsufficientFundsError } from '../services/balanceService.js';
 import { logAudit, extractRequestContext, buildDiff, AuditActorType } from '../services/auditService.js';
 
 async function getExistingPendingEntry(
@@ -37,6 +37,21 @@ const ProjectSchema = z.object({
   startDate: z.string().datetime().optional(),
   dueDate: z.string().datetime().optional(),
 });
+
+/**
+ * A plain function rather than a `.refine()` on the schema itself — `.extend()`
+ * and `.partial()` (both used elsewhere against `ProjectSchema`) only exist on
+ * a `ZodObject`, and wrapping it in `.refine()` would have swapped that for a
+ * `ZodEffects` that neither method exists on. Called manually wherever a
+ * start/due date pair is actually being set, on create and on update.
+ */
+function validateProjectDates(startDate?: string, dueDate?: string): string | null {
+  if (!startDate || !dueDate) return null;
+  if (new Date(dueDate) < new Date(startDate)) {
+    return 'Due date cannot be before the start date';
+  }
+  return null;
+}
 
 const MilestoneSchema = z.object({
   name: z.string().min(1),
@@ -128,7 +143,17 @@ const deriveStatusFromMilestones = (currentStatus: string, milestones: Array<{ s
 
 const applyOverdueStatus = (status: string, dueDate?: Date | null) => {
   if (status === 'COMPLETED' || status === 'CANCELLED') return status;
-  if (dueDate && dueDate.getTime() < Date.now()) return 'OVERDUE';
+  // Compared by calendar date, not exact timestamp. A due date sent as a bare
+  // date (no time component) parses as UTC midnight — a project due "today"
+  // was already in the past the moment it was created for anyone in a
+  // timezone ahead of UTC, and showed OVERDUE within minutes of being made.
+  // It isn't overdue until the day it's due has actually finished.
+  if (dueDate) {
+    const dueDay = Date.UTC(dueDate.getUTCFullYear(), dueDate.getUTCMonth(), dueDate.getUTCDate());
+    const now = new Date();
+    const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    if (dueDay < today) return 'OVERDUE';
+  }
   return status;
 };
 
@@ -321,6 +346,11 @@ export const createProject = async (req: AuthRequest, res: Response) => {
     }
 
     const payload = parsed.data;
+
+    const dateError = validateProjectDates(payload.startDate, payload.dueDate);
+    if (dateError) {
+      return res.status(400).json({ success: false, message: dateError });
+    }
 
     // Server-side guard: COMPLETED can only be set automatically via all phases completing
     if (payload.status === 'COMPLETED') {
@@ -675,6 +705,17 @@ export const updateProject = async (req: AuthRequest, res: Response) => {
     }
 
     const data = parsed.data;
+
+    // Checked against whichever date isn't being changed too — updating just
+    // the due date must still be compared against the start date already on
+    // record, not silently skipped because this request didn't mention it.
+    const dateError = validateProjectDates(
+      data.startDate ?? existing.startDate?.toISOString(),
+      data.dueDate ?? existing.dueDate?.toISOString(),
+    );
+    if (dateError) {
+      return res.status(400).json({ success: false, message: dateError });
+    }
 
     // Server-side guard: COMPLETED can only be set automatically via all phases completing
     if (data.status === 'COMPLETED') {
@@ -1547,6 +1588,9 @@ export const addMaterial = async (req: AuthRequest, res: Response) => {
     if (error instanceof ApiError) {
       return res.status(error.statusCode).json({ success: false, message: error.message });
     }
+    if (error instanceof InsufficientFundsError) {
+      return res.status(400).json({ success: false, message: error.message });
+    }
     console.error('Error adding material:', error);
     return res.status(500).json({
       success: false,
@@ -1833,6 +1877,9 @@ export const updateMaterial = async (req: AuthRequest, res: Response) => {
         success: false,
         message: error.message,
       });
+    }
+    if (error instanceof InsufficientFundsError) {
+      return res.status(400).json({ success: false, message: error.message });
     }
     console.error('Error updating material:', error);
     return res.status(500).json({
@@ -2361,6 +2408,12 @@ export const addProjectExpense = async (req: AuthRequest, res: Response) => {
   } catch (error) {
     if (error instanceof ApiError) {
       return res.status(error.statusCode).json({ success: false, message: error.message });
+    }
+    // recordExpense throws this whenever the tenant's balance can't cover it
+    // — including simply not having a balance row yet. That's the caller's
+    // situation to fix (top up funds), not a server fault.
+    if (error instanceof InsufficientFundsError) {
+      return res.status(400).json({ success: false, message: error.message });
     }
     console.error('Error adding project expense:', error);
     return res.status(500).json({ success: false, message: 'Failed to add expense' });
