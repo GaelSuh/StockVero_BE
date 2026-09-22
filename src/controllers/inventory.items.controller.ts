@@ -26,7 +26,7 @@ import { logAudit, extractRequestContext, buildDiff, AuditActorType } from '../s
  * differently than you would guess, which is what let every duplicate
  * abbreviation surface as a 500 instead of the 409 meant for it.
  */
-function isUniqueViolationOn(error: unknown, column: string): boolean {
+export function isUniqueViolationOn(error: unknown, column: string): boolean {
   const e = error as any;
   if (e?.code !== 'P2002') return false;
 
@@ -47,11 +47,11 @@ function isUniqueViolationOn(error: unknown, column: string): boolean {
 
 /**
  * A ProductItem carries exactly one of these, depending on its category type.
- * They overlap but are not identical: SOLD and DEPLOYED are stock-only, IN_USE
- * is inventory-only.
+ * They overlap but are not identical: DEPLOYED is stock-only (also covers a
+ * sold unit — there is no separate SOLD status), IN_USE is inventory-only.
  */
 const STOCK_ITEM_STATUSES = new Set([
-  'AVAILABLE', 'DEPLOYED', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD', 'SOLD',
+  'AVAILABLE', 'DEPLOYED', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD',
 ]);
 const INVENTORY_ITEM_STATUSES = new Set([
   'AVAILABLE', 'IN_USE', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD',
@@ -62,7 +62,9 @@ const INVENTORY_ITEM_STATUSES = new Set([
 export const fetchCategoryById = (tenantId: string, id: string) =>
   (prisma as any).inventoryCategory.findFirst({
     where: { tenantId, id },
-    include: { productCategory: true },
+    // _count.variants lets formatCategory tell "no variants" apart from
+    // "variants not loaded" the same way the list endpoint already does.
+    include: { productCategory: true, _count: { select: { variants: true } } },
   });
 
 // ── Stock event logger ────────────────────────────────────────────────────────
@@ -210,6 +212,9 @@ export const ProductItemCreateSchema = z.object({
   identifierMode: z.enum(['manual', 'auto']),
   userIdentifier: z.string().optional(),
   notes: z.string().optional(),
+  /** Which option of the product this unit is. Absent = the product has no
+   * variants, which is every product until one is created for it. */
+  variantId: z.string().optional(),
   // Accept any valid status string — validated at runtime against category type
   status: z.string().optional(),
 });
@@ -218,6 +223,15 @@ const ProductItemUpdateSchema = z.object({
   name: z.string().optional(),
   userIdentifier: z.string().optional(),
   notes: z.string().optional(),
+  /**
+   * Which option this unit is. Assignable after the fact, not just at
+   * creation: a product's variants are often defined after its stock already
+   * exists, and without this those units could never be attributed — every
+   * variant would read zero available while the shelf was full, and the
+   * authorised-quantity cap blocks deleting and re-adding them.
+   * Empty string clears it back to un-attributed.
+   */
+  variantId: z.string().optional(),
   // Accept any string — validated at runtime against category type
   status: z.string().optional(),
   imageUrl: z.string().url().optional().or(z.literal('')),
@@ -275,12 +289,38 @@ const buildCategoryStats = async (tenantId: string, categoryId: string, category
   };
 };
 
+/**
+ * Sum of every variant's own quantityOnHand, per category. A QUANTITY
+ * product's variants each carry their own counter (see
+ * assertVariantQuantityWithinCeiling in variants.controller.ts) and a sale
+ * deducts from the variant, never from the category's own quantityOnHand
+ * column — so once a product has variants, this sum, not the category's own
+ * column, is the number that is actually still true. Categories with no
+ * variants are simply absent from the result (sum of nothing), which callers
+ * must tell apart from "has variants, all sold out" using variantCount / the
+ * category's own _count.variants — never treat a missing entry as 0 stock.
+ */
+const getVariantQuantitySums = async (
+  tenantId: string,
+  categoryIds: string[],
+): Promise<Record<string, number>> => {
+  if (categoryIds.length === 0) return {};
+  const rows = await (prisma as any).productVariant.groupBy({
+    by: ['categoryId'],
+    where: { tenantId, categoryId: { in: categoryIds } },
+    _sum: { quantityOnHand: true },
+  });
+  const map: Record<string, number> = {};
+  for (const row of rows) map[row.categoryId] = row._sum.quantityOnHand ?? 0;
+  return map;
+};
+
 /** Batch version: builds stats for ALL given categories in ~6 queries total instead of 5 × N. */
 const buildBatchCategoryStats = async (tenantId: string, categories: Array<{ id: string; type: string }>) => {
   const categoryIds = categories.map(c => c.id);
-  if (categoryIds.length === 0) return new Map<string, Awaited<ReturnType<typeof buildCategoryStats>>>();
+  if (categoryIds.length === 0) return new Map<string, CategoryStats>();
 
-  // 6 total queries regardless of N categories
+  // 7 total queries regardless of N categories
   const [
     totalByCategory,
     stockAvailable,
@@ -291,6 +331,7 @@ const buildBatchCategoryStats = async (tenantId: string, categories: Array<{ id:
     invMaintenance,
     stockFaulty,
     invFaulty,
+    variantQuantitySums,
   ] = await Promise.all([
     (prisma as any).productItem.groupBy({ by: ['categoryId'], where: { tenantId, categoryId: { in: categoryIds } }, _count: { id: true } }),
     (prisma as any).productItem.groupBy({ by: ['categoryId'], where: { tenantId, categoryId: { in: categoryIds }, stockStatus: 'AVAILABLE' }, _count: { id: true } }),
@@ -301,6 +342,7 @@ const buildBatchCategoryStats = async (tenantId: string, categories: Array<{ id:
     (prisma as any).productItem.groupBy({ by: ['categoryId'], where: { tenantId, categoryId: { in: categoryIds }, inventoryStatus: 'UNDER_MAINTENANCE' }, _count: { id: true } }),
     (prisma as any).productItem.groupBy({ by: ['categoryId'], where: { tenantId, categoryId: { in: categoryIds }, stockStatus: { in: ['FAULTY', 'COMPLETELY_BAD'] } }, _count: { id: true } }),
     (prisma as any).productItem.groupBy({ by: ['categoryId'], where: { tenantId, categoryId: { in: categoryIds }, inventoryStatus: { in: ['FAULTY', 'COMPLETELY_BAD'] } }, _count: { id: true } }),
+    getVariantQuantitySums(tenantId, categoryIds),
   ]);
 
   const toMap = (groups: any[]) => {
@@ -319,7 +361,7 @@ const buildBatchCategoryStats = async (tenantId: string, categories: Array<{ id:
   const stockFaultyMap = toMap(stockFaulty);
   const invFaultyMap = toMap(invFaulty);
 
-  const result = new Map<string, Awaited<ReturnType<typeof buildCategoryStats>>>();
+  const result = new Map<string, CategoryStats>();
   for (const cat of categories) {
     const isStock = cat.type === 'STOCK';
     result.set(cat.id, {
@@ -330,17 +372,34 @@ const buildBatchCategoryStats = async (tenantId: string, categories: Array<{ id:
         : { inUseCount: invInUseMap[cat.id] ?? 0 }),
       maintenanceCount: isStock ? (stockMaintMap[cat.id] ?? 0) : (invMaintMap[cat.id] ?? 0),
       faultyCount: isStock ? (stockFaultyMap[cat.id] ?? 0) : (invFaultyMap[cat.id] ?? 0),
+      variantQuantitySum: variantQuantitySums[cat.id] ?? 0,
     });
   }
   return result;
 };
 
-type CategoryStats = Awaited<ReturnType<typeof buildCategoryStats>>;
+type CategoryStats = Awaited<ReturnType<typeof buildCategoryStats>> & {
+  /** Sum of every variant's quantityOnHand — only computed for QUANTITY products. */
+  variantQuantitySum?: number;
+  /** "Out with a customer, not yet returned" for a QUANTITY product — the
+   * analogue of a SERIALIZED unit's DEPLOYED status. Only computed for
+   * QUANTITY products (see getCategoryById). */
+  soldCount?: number;
+};
 
 const formatCategory = (cat: any, stats: CategoryStats) => {
   const isStock = (cat.type ?? 'STOCK') === 'STOCK';
-  // Quantity-tracked products have no unit rows; their stock is the column.
-  const availableCount = getAvailableStock(cat, stats.availableCount);
+  const variantCount = cat._count?.variants ?? 0;
+  // Quantity-tracked products have no unit rows; their stock is the column —
+  // UNLESS the product has variants, in which case each variant carries its
+  // OWN quantityOnHand (see assertVariantQuantityWithinCeiling in
+  // variants.controller.ts) and a sale deducts from the variant, never from
+  // this category's own column. The category's number then stops moving —
+  // the sum of the variants is the number that is actually still true.
+  const availableCount =
+    isQuantityTracked(cat) && variantCount > 0
+      ? (stats.variantQuantitySum ?? 0)
+      : getAvailableStock(cat, stats.availableCount);
   const valuedCount = isQuantityTracked(cat)
     ? availableCount
     : isStock
@@ -373,6 +432,14 @@ const formatCategory = (cat: any, stats: CategoryStats) => {
     notes: cat.notes,
     stockTrackingMode: cat.stockTrackingMode ?? 'SERIALIZED',
     quantityOnHand: cat.quantityOnHand ?? 0,
+    /**
+     * How many variants this product has. The offline catalogue turns this
+     * into CachedProduct.hasVariants, which is what lets the till know a
+     * scanned product-level barcode is ambiguous without asking the server.
+     * Absent (0) on endpoints that do not include _count — a product with no
+     * variants and a product whose count was not loaded behave identically.
+     */
+    variantCount,
     hasUniquePerUnitBarcode: cat.hasUniquePerUnitBarcode ?? null,
   retailEnabled: cat.retailEnabled ?? true,
   wholesaleEnabled: cat.wholesaleEnabled ?? true,
@@ -418,6 +485,7 @@ const computeCategoryStatuses = async (tenantId: string, where: any) => {
       reorderThreshold: true,
       stockTrackingMode: true,
       quantityOnHand: true,
+      _count: { select: { variants: true } },
     },
   });
 
@@ -437,7 +505,7 @@ const computeCategoryStatuses = async (tenantId: string, where: any) => {
     return map;
   };
 
-  const [stockAvailable, invAvailable, stockDeployed, invInUse, maintenance, faulty] =
+  const [stockAvailable, invAvailable, stockDeployed, invInUse, maintenance, faulty, variantQuantitySums] =
     await Promise.all([
       countBy('stockStatus', ['AVAILABLE']),
       countBy('inventoryStatus', ['AVAILABLE']),
@@ -445,6 +513,7 @@ const computeCategoryStatuses = async (tenantId: string, where: any) => {
       countBy('inventoryStatus', ['IN_USE']),
       countBy('stockStatus', ['UNDER_MAINTENANCE']),
       countBy('stockStatus', ['FAULTY', 'COMPLETELY_BAD']),
+      getVariantQuantitySums(tenantId, ids),
     ]);
 
   let inStock = 0;
@@ -458,7 +527,14 @@ const computeCategoryStatuses = async (tenantId: string, where: any) => {
   for (const cat of categories) {
     const isStock = (cat.type ?? 'STOCK') === 'STOCK';
     const units = isStock ? (stockAvailable[cat.id] ?? 0) : (invAvailable[cat.id] ?? 0);
-    const onHand = getAvailableStock(cat, units);
+    // Same rule as formatCategory: once a QUANTITY product has variants, each
+    // variant's own counter is what a sale actually moves, so their sum is
+    // what "on hand" means now — never the category's own frozen column.
+    const hasVariants = (cat._count?.variants ?? 0) > 0;
+    const onHand =
+      isQuantityTracked(cat) && hasVariants
+        ? (variantQuantitySums[cat.id] ?? 0)
+        : getAvailableStock(cat, units);
 
     available += onHand;
     inUse += isStock ? (stockDeployed[cat.id] ?? 0) : (invInUse[cat.id] ?? 0);
@@ -546,7 +622,9 @@ export const listCategories = async (req: AuthRequest, res: Response) => {
     const categories = await (prisma as any).inventoryCategory.findMany({
       where,
       orderBy: { name: 'asc' },
-      include: { productCategory: true },
+      // _count.variants lets the offline catalogue set hasVariants per product
+      // without one extra round trip per product at sync time.
+      include: { productCategory: true, _count: { select: { variants: true } } },
       ...(paginated
         ? { skip: (page - 1) * pageSize, take: pageSize }
         : limit
@@ -598,7 +676,9 @@ export const getCategoryById = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ success: false, message: 'Category not found' });
     }
 
-    const [stats, invoices, documents] = await Promise.all([
+    const quantityTracked = isQuantityTracked(category);
+
+    const [baseStats, invoices, documents, variantAgg, soldAgg] = await Promise.all([
       buildCategoryStats(tenantId, category.id, category.type ?? 'STOCK'),
       (prisma as any).invoice.findMany({
         where: { tenantId, categoryId: category.id },
@@ -610,7 +690,38 @@ export const getCategoryById = async (req: AuthRequest, res: Response) => {
         where: { tenantId, sourceModule: 'INVENTORY', sourceId: category.id },
         orderBy: { createdAt: 'desc' },
       }),
+      // Sum of every variant's own quantityOnHand — see formatCategory for why
+      // this, not category.quantityOnHand, is the live "available" number once
+      // the product has variants.
+      quantityTracked
+        ? (prisma as any).productVariant.aggregate({
+            where: { tenantId, categoryId: category.id },
+            _sum: { quantityOnHand: true },
+          })
+        : null,
+      // "Deployed" for a QUANTITY product has no per-unit ProductItem rows to
+      // count, so it is derived the same way as everywhere else stock moves
+      // for this kind of product: from the ledger. SALE_DEDUCTION rows are
+      // negative, RETURN_RESTORATION rows are positive, so -sum(delta) is
+      // "out with a customer and not yet returned" — the quantity-tracked
+      // analogue of a SERIALIZED unit sitting at stockStatus DEPLOYED.
+      quantityTracked
+        ? (prisma as any).categoryStockLog.aggregate({
+            where: {
+              tenantId,
+              categoryId: category.id,
+              eventType: { in: ['SALE_DEDUCTION', 'RETURN_RESTORATION'] },
+            },
+            _sum: { delta: true },
+          })
+        : null,
     ]);
+
+    const stats = {
+      ...baseStats,
+      ...(variantAgg ? { variantQuantitySum: variantAgg._sum.quantityOnHand ?? 0 } : {}),
+      ...(soldAgg ? { soldCount: Math.max(0, -(soldAgg._sum.delta ?? 0)) } : {}),
+    };
 
     // Stock history: category-level stock events (new unit, deployed, maintenance, etc.)
     const stockLogs = await (prisma as any).categoryStockLog.findMany({
@@ -1088,7 +1199,7 @@ export const createProductItem = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const { categoryId, name, identifierMode, userIdentifier, notes, status } = parsed.data;
+    const { categoryId, name, identifierMode, userIdentifier, notes, status, variantId } = parsed.data;
 
     if (identifierMode === 'manual' && !userIdentifier?.trim()) {
       return res.status(422).json({
@@ -1196,11 +1307,38 @@ export const createProductItem = async (req: AuthRequest, res: Response) => {
         ? { inventoryStatus: (status ?? 'AVAILABLE') as any, stockStatus: null }
         : { stockStatus: (status ?? 'AVAILABLE') as any, inventoryStatus: null };
 
+    // Which variant this physical unit belongs to. Validated against this
+    // tenant and this category rather than trusted: a variantId from another
+    // product would put the unit in stock under an option that product does
+    // not sell, and it could never be found again by the variant-scoped
+    // stock queries.
+    let resolvedVariantId: string | null = null;
+    if (variantId) {
+      const variant = await (prisma as any).productVariant.findFirst({
+        where: { id: variantId, tenantId, categoryId },
+        select: { id: true, isActive: true },
+      });
+      if (!variant) {
+        return res.status(422).json({
+          success: false,
+          message: 'That variant does not belong to this product.',
+        });
+      }
+      if (!variant.isActive) {
+        return res.status(422).json({
+          success: false,
+          message: 'That variant is deactivated. Reactivate it before adding stock to it.',
+        });
+      }
+      resolvedVariantId = variant.id;
+    }
+
     const item = await (prisma as any).productItem.create({
       data: {
         tenantId,
         categoryId,
         systemId,
+        variantId: resolvedVariantId,
         name: name?.trim() ?? null,
         userIdentifier: resolvedUserIdentifier,
         notes: notes?.trim() ?? null,
@@ -1294,6 +1432,8 @@ const RestockRequestSchema = z.object({
   isNewPurchase: z.boolean().optional(),
   /** Device-generated id for a restock recorded offline; makes the retry safe. */
   offlineId: z.string().optional(),
+  /** Which option the stock is for. Absent = the product has no variants. */
+  variantId: z.string().optional(),
   quantity: z.coerce.number().int().positive(),
   costPrice: z.coerce.number().nonnegative().optional(),
   plannedDate: z.string().optional(),
@@ -1323,6 +1463,15 @@ export const restockRequest = async (req: AuthRequest, res: Response) => {
 
     const { quantity, costPrice, plannedDate, notes } = parsed.data;
     const effectiveCostPrice = costPrice ?? Number(category.costPrice ?? 0);
+    // Not blocked — a clearance/loss-leader restock can be intentional (same
+    // pattern as the below-cost warning on product creation) — but a per-unit
+    // cost at or above what it's sold for is usually a decimal slip on a bulk
+    // invoice, so the till gets a warning to double check before it goes unnoticed.
+    const sellingPrice = Number(category.sellingPrice ?? 0);
+    const priceWarning =
+      sellingPrice > 0 && effectiveCostPrice >= sellingPrice
+        ? `Cost price (${effectiveCostPrice}) is at or above the current selling price (${sellingPrice}) for ${category.name}. Double-check this isn't a data-entry mistake.`
+        : undefined;
 
     // Quantity-tracked stock arrives immediately: the count goes up by the amount
     // restocked (an addition, not a replacement) and the purchase is booked. No
@@ -1345,6 +1494,10 @@ export const restockRequest = async (req: AuthRequest, res: Response) => {
           categoryName: category.name,
           note: notes,
           offlineId: parsed.data.offlineId,
+          // Without this an offline receipt against an option credited the
+          // parent product instead, and the device's own count for that option
+          // silently disagreed with the server from then on.
+          variantId: parsed.data.variantId ?? null,
         });
         return (tx as any).inventoryCategory.findUnique({ where: { id: category.id } });
       });
@@ -1359,14 +1512,20 @@ export const restockRequest = async (req: AuthRequest, res: Response) => {
         entityType: 'InventoryCategory',
         entityId: category.id,
         entityLabel: category.name,
-        details: { quantity, costPrice: effectiveCostPrice },
+        details: {
+          quantity,
+          costPrice: effectiveCostPrice,
+          // Which option was credited — a log saying only "the product" cannot
+          // answer where the stock actually went.
+          variantId: parsed.data.variantId ?? null,
+        },
         ...extractRequestContext(req),
       });
 
       return res.status(200).json({
         success: true,
         message: `${quantity} unit(s) added to ${category.name}`,
-        data: { category: invoiceless, invoice: null },
+        data: { category: invoiceless, invoice: null, priceWarning },
       });
     }
 
@@ -1428,7 +1587,7 @@ export const restockRequest = async (req: AuthRequest, res: Response) => {
       message: needsApproval
         ? 'Restock request submitted successfully. Awaiting finance approval.'
         : `${quantity} more unit(s) authorised for ${category.name}. You can add them now.`,
-      data: { invoice, effectiveCostPrice, quantity, requiresApproval: needsApproval },
+      data: { invoice, effectiveCostPrice, quantity, requiresApproval: needsApproval, priceWarning },
     });
   } catch (error) {
     console.error('Error creating restock request:', error);
@@ -1460,6 +1619,12 @@ export const listProductItems = async (req: AuthRequest, res: Response) => {
     const where: any = { tenantId };
     if (categoryId) where.categoryId = categoryId;
 
+    // Backfilling variants onto stock that predates them means finding the
+    // units that still have none — "none" filters to exactly those.
+    const variantFilter = req.query.variantId ? String(req.query.variantId) : undefined;
+    if (variantFilter === 'none') where.variantId = null;
+    else if (variantFilter) where.variantId = variantFilter;
+
     // Each clause goes in its own AND entry. Assigning both to `where.OR` meant a
     // search silently discarded the status filter.
     const and: any[] = [];
@@ -1467,7 +1632,7 @@ export const listProductItems = async (req: AuthRequest, res: Response) => {
       // Status lives in whichever column suits the category type, so both are
       // searched — but only for the enums that actually declare the value.
       // Postgres rejects an unknown enum member outright, so asking
-      // inventoryStatus for 'SOLD' threw and surfaced as a 500.
+      // inventoryStatus for a stock-only value threw and surfaced as a 500.
       const statusOr: any[] = [];
       if (STOCK_ITEM_STATUSES.has(status)) statusOr.push({ stockStatus: status });
       if (INVENTORY_ITEM_STATUSES.has(status)) statusOr.push({ inventoryStatus: status });
@@ -1482,13 +1647,24 @@ export const listProductItems = async (req: AuthRequest, res: Response) => {
           { systemId: { contains: search, mode: 'insensitive' } },
           { userIdentifier: { contains: search, mode: 'insensitive' } },
           { name: { contains: search, mode: 'insensitive' } },
+          // So "blue" finds every Blue unit, not just one whose serial
+          // happens to contain those letters.
+          { variant: { label: { contains: search, mode: 'insensitive' } } },
         ],
       });
     }
     if (and.length) where.AND = and;
 
     const [items, total] = await Promise.all([
-      (prisma as any).productItem.findMany({ where, orderBy: { createdAt: 'desc' }, skip, take: limit }),
+      (prisma as any).productItem.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+        // Every row can then say which option it is, rather than the units
+        // list looking like a wall of identical serials.
+        include: { variant: { select: { id: true, label: true } } },
+      }),
       (prisma as any).productItem.count({ where }),
     ]);
 
@@ -1571,7 +1747,35 @@ export const updateProductItem = async (req: AuthRequest, res: Response) => {
     const catType: string = existing.category?.type ?? 'STOCK';
     const validStatusSet = catType === 'INVENTORY' ? INVENTORY_STATUSES : STOCK_STATUSES;
 
-    const { name, userIdentifier, notes, imageUrl, status } = parsed.data;
+    const { name, userIdentifier, notes, imageUrl, status, variantId } = parsed.data;
+
+    // Same check as the create path: a variant from another product would put
+    // this unit under an option the product does not sell, where no
+    // variant-scoped stock read would ever find it again.
+    let resolvedVariantId: string | null | undefined;
+    if (variantId !== undefined) {
+      if (!variantId) {
+        resolvedVariantId = null;
+      } else {
+        const variant = await (prisma as any).productVariant.findFirst({
+          where: { id: variantId, tenantId, categoryId: existing.categoryId },
+          select: { id: true, isActive: true },
+        });
+        if (!variant) {
+          return res.status(422).json({
+            success: false,
+            message: 'That variant does not belong to this product.',
+          });
+        }
+        if (!variant.isActive) {
+          return res.status(422).json({
+            success: false,
+            message: 'That variant is deactivated. Reactivate it before assigning stock to it.',
+          });
+        }
+        resolvedVariantId = variant.id;
+      }
+    }
 
     if (status && !validStatusSet.has(status)) {
       return res.status(422).json({
@@ -1601,6 +1805,7 @@ export const updateProductItem = async (req: AuthRequest, res: Response) => {
         ...(name !== undefined && { name: name.trim() || null }),
         ...(userIdentifier !== undefined && { userIdentifier }),
         ...(notes !== undefined && { notes }),
+        ...(resolvedVariantId !== undefined && { variantId: resolvedVariantId }),
         ...statusUpdate,
         ...(imageUrl !== undefined && { imageUrl: imageUrl || null }),
       },

@@ -10,6 +10,18 @@ import { checkInventoryCategoryDependencies, checkProductItemDependencies } from
 import { broadcastToModule } from '../services/notificationService.js';
 import { createMovement } from '../controllers/inventory.controller.js';
 import {
+  createVariant,
+  generateVariants,
+  listVariants,
+  listAllVariantsForTenant,
+  getVariant,
+  updateVariant,
+  setVariantActive,
+  assignUnitsToVariant,
+  canDeleteVariant,
+  deleteVariant,
+} from '../controllers/variants.controller.js';
+import {
   listProductCategories,
   createProductCategory,
   listProductNames,
@@ -947,6 +959,33 @@ router.delete('/categories/:id', permissionGuard('inventory', 'canDelete'), asyn
  */
 router.get('/categories/:id/availability', permissionGuard('inventory', 'canRead'), checkCategoryAvailability);
 router.post('/categories/:id/restock-request', permissionGuard('inventory', 'canCreate'), restockRequest);
+
+// ── Product variants ───────────────────────────────────────────────────────────
+//
+// Mounted here rather than in their own router so they inherit this file's
+// `router.use(tenantGuard, mustChangePasswordGuard, moduleGuard('inventory'))`
+// and the same permissionGuard('inventory', ...) matrix the category routes
+// use. A separate router on the same /api/v1/inventory prefix would have had
+// to restate all of that, and would drift from it over time.
+//
+// `/categories/:categoryId/variants` does not collide with `/categories/:id`
+// — Express matches path segment counts, so the single-segment category
+// routes above are unaffected.
+router.post('/categories/:categoryId/variants', permissionGuard('inventory', 'canCreate'), createVariant);
+// Whole-matrix generation: one transaction, one audit entry, one notification.
+router.post('/categories/:categoryId/variants/generate', permissionGuard('inventory', 'canCreate'), generateVariants);
+router.get('/categories/:categoryId/variants', permissionGuard('inventory', 'canRead'), listVariants);
+// Whole-tenant list, for the offline catalogue sync. Declared before
+// '/variants/:id' for readability; they cannot collide anyway (different
+// segment counts).
+router.get('/variants', permissionGuard('inventory', 'canRead'), listAllVariantsForTenant);
+router.get('/variants/:id', permissionGuard('inventory', 'canRead'), getVariant);
+router.patch('/variants/:id', permissionGuard('inventory', 'canUpdate'), updateVariant);
+router.patch('/variants/:id/deactivate', permissionGuard('inventory', 'canUpdate'), setVariantActive(false));
+router.patch('/variants/:id/reactivate', permissionGuard('inventory', 'canUpdate'), setVariantActive(true));
+router.post('/variants/:id/assign-units', permissionGuard('inventory', 'canUpdate'), assignUnitsToVariant);
+router.get('/variants/:id/can-delete', permissionGuard('inventory', 'canDelete'), canDeleteVariant);
+router.delete('/variants/:id', permissionGuard('inventory', 'canDelete'), deleteVariant);
 
 // ── Serialised items ───────────────────────────────────────────────────────────
 

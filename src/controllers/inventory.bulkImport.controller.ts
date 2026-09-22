@@ -344,6 +344,21 @@ export const bulkImportProducts = async (req: AuthRequest, res: Response) => {
       }
     }
 
+    // ── Cost vs. selling price — a warning, not a block ───────────────────────
+    // Each row defines both prices for a new product. Cost at or above selling
+    // is usually a decimal slip, not a deliberate loss-leader, so it's flagged
+    // for review rather than rejecting rows that might be entirely intentional.
+    const priceWarnings: RowError[] = [];
+    for (const row of rows) {
+      if (row.sellingPrice > 0 && row.costPrice >= row.sellingPrice) {
+        priceWarnings.push({
+          row: row.row,
+          field: 'costPrice',
+          message: `Cost price (${row.costPrice}) is at or above the selling price (${row.sellingPrice}) for "${row.name}". Double-check this isn't a data-entry mistake.`,
+        });
+      }
+    }
+
     // ── Resolve categories ────────────────────────────────────────────────────
     const referencedIds = [...new Set(rows.map((r) => r.categoryId).filter(Boolean) as string[])];
     const existingCategories = await (prisma as any).productCategory.findMany({
@@ -533,6 +548,7 @@ export const bulkImportProducts = async (req: AuthRequest, res: Response) => {
         categoriesCreated: result.categoriesCreated,
         products: result.createdProducts,
         errors: [],
+        warnings: priceWarnings,
       },
     });
   } catch (error) {
