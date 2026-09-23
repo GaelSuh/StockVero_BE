@@ -722,7 +722,9 @@ export const deleteEmployee = async (req: AuthRequest, res: Response) => {
       type: 'administration.employee.deleted',
       title: 'Employee Deactivated',
       message: `${employee.firstName} ${employee.lastName}'s account has been deactivated.`,
-      link: `/admin/employees/${updatedEmployee.id}`,
+      // The update above is not assigned; the employee being deactivated is the
+      // one already loaded, and its id is the same one that was just updated.
+      link: `/admin/employees/${employee.id}`,
     });
 
     void logAudit({

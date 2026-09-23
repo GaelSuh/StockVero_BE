@@ -70,6 +70,40 @@ export async function recordIncome(
   });
 }
 
+/**
+ * Books an expense that has already happened, without asking whether the tenant
+ * could afford it.
+ *
+ * Use this for recording facts — stock bought and received, for instance. The
+ * money left the business before StockVero was told about it, so refusing to
+ * write it down would just mean the ledger can never catch up with reality, and
+ * a shop that stocks up before its first sale could never record anything.
+ *
+ * For money the system is *authorising* to be spent (project materials, purchase
+ * invoices), use `recordExpense`, which refuses to overdraw.
+ */
+export async function applyExpense(
+  tenantId: string,
+  amount: number,
+  tx: PrismaWriteClient = prisma,
+): Promise<void> {
+  if (amount <= 0) return;
+
+  await (tx as any).tenantFinanceBalance.upsert({
+    where: { tenantId },
+    update: {
+      totalExpense: { increment: amount },
+      netBalance: { decrement: amount },
+    },
+    create: {
+      tenantId,
+      totalIncome: 0,
+      totalExpense: amount,
+      netBalance: -amount,
+    },
+  });
+}
+
 export async function recordExpense(
   tenantId: string,
   amount: number,

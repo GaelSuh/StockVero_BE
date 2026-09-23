@@ -1,8 +1,24 @@
 import { Router } from 'express';
 import { tenantGuard, roleGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
-import { getTenantModules, updateTenantModule, updateMyTenant, updateMyTenantTheme } from '../controllers/tenants.controller.js';
+import {
+  getTenantModules,
+  updateTenantModule,
+  updateMyTenant,
+  updateMyTenantTheme,
+  listIndustries,
+} from '../controllers/tenants.controller.js';
 
 const router = Router();
+
+/**
+ * The catalogue of business types. Deliberately registered *before* tenantGuard:
+ * the signup screen needs it while there is no tenant and no token, and a
+ * guarded route would reject the one caller that matters most. It exposes
+ * nothing tenant-specific — just the list of options and their suggested
+ * modules.
+ */
+router.get('/industries', listIndustries);
+
 router.use(tenantGuard, mustChangePasswordGuard);
 
 /**

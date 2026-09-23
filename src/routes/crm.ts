@@ -9,6 +9,8 @@ import {
   updateCustomer,
   deleteCustomer,
   getCustomerInvoices,
+  getCustomerCreditSalesController,
+  getCustomerPurchaseHistoryController,
   listCustomerPurchases,
   addCustomerPurchase,
   deleteCustomerPurchase,
@@ -177,6 +179,8 @@ router.delete('/customers/:id', permissionGuard('crm', 'canDelete'), async (req:
 });
 
 router.get('/customers/:id/invoices', permissionGuard('crm', 'canRead'), getCustomerInvoices);
+router.get('/customers/:id/credit-sales', permissionGuard('crm', 'canRead'), getCustomerCreditSalesController);
+router.get('/customers/:id/purchase-history', permissionGuard('crm', 'canRead'), getCustomerPurchaseHistoryController);
 
 // ── Customer Purchases ───────────────────────────────────────────────────────
 router.get('/customers/:id/purchases', permissionGuard('crm', 'canRead'), listCustomerPurchases);

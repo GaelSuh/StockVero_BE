@@ -23,7 +23,7 @@ export async function sendEmail({
   to: string;
   subject: string;
   html: string;
-}): Promise<void> {
+}): Promise<boolean> {
   let sent = false;
 
   if (resend) {
@@ -63,5 +63,7 @@ export async function sendEmail({
   if (!sent) {
     console.warn(`[email] No email provider configured — skipping email to ${to}: ${subject}`);
   }
+
+  return sent;
 }
 

@@ -9,7 +9,7 @@ export interface Permission {
 }
 
 export interface JWTPayload {
-  userId: string;
+  userId?: string;
   tenantId?: string;
   tenantSlug?: string;
   accountType?: 'owner' | 'employee';
@@ -21,7 +21,8 @@ export interface JWTPayload {
   permissions?: Record<string, Permission>;
   isAdmin?: boolean;
   userType?: 'OWNER' | 'EMPLOYEE';
-  purpose?: 'password_reset';
+  email?: string;
+  purpose?: 'password_reset' | 'email_verification';
   iat?: number;
   exp?: number;
 }

@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { prisma } from '../db.js';
 import { AuthRequest } from '../types/index.js';
+import { getAvailableStock } from '../lib/stock.js';
 
 export const getStats = async (req: AuthRequest, res: Response) => {
   try {
@@ -19,6 +20,9 @@ export const getStats = async (req: AuthRequest, res: Response) => {
     const projectsEnabled = canRead('projects');
     const inventoryEnabled = canRead('inventory');
     const financeEnabled = canRead('finance');
+    const retailEnabled = canRead('retail_sales');
+    const wholesaleEnabled = canRead('wholesale_sales');
+    const salesEnabled = retailEnabled || wholesaleEnabled;
 
     const [
       customerCount,
@@ -28,6 +32,10 @@ export const getStats = async (req: AuthRequest, res: Response) => {
       summary,
       inventoryValue,
       bestSellingProducts,
+      retailStats,
+      wholesaleStats,
+      recentSales,
+      salesChartData,
     ] = await Promise.all([
       crmEnabled
         ? prisma.customer.count({ where: { tenantId } })
@@ -44,7 +52,14 @@ export const getStats = async (req: AuthRequest, res: Response) => {
         ? (async () => {
             const categories = await (prisma as any).inventoryCategory.findMany({
               where: { tenantId, reorderThreshold: { gt: 0 } },
-              select: { id: true, name: true, type: true, reorderThreshold: true },
+              select: {
+                id: true,
+                name: true,
+                type: true,
+                reorderThreshold: true,
+                stockTrackingMode: true,
+                quantityOnHand: true,
+              },
             });
             if (categories.length === 0) return [];
 
@@ -68,9 +83,11 @@ export const getStats = async (req: AuthRequest, res: Response) => {
 
             return categories
               .map((cat: any) => {
-                const available = cat.type === 'INVENTORY'
+                const units = cat.type === 'INVENTORY'
                   ? (invCounts.find((g: any) => g.categoryId === cat.id)?._count?.id ?? 0)
                   : (stockCounts.find((g: any) => g.categoryId === cat.id)?._count?.id ?? 0);
+                // Quantity-tracked products have no unit rows to count.
+                const available = getAvailableStock(cat, units);
                 return { id: cat.id, name: cat.name, type: cat.type, available, reorderThreshold: cat.reorderThreshold };
               })
               .filter((r: any) => r.available <= r.reorderThreshold)
@@ -154,6 +171,41 @@ export const getStats = async (req: AuthRequest, res: Response) => {
               }));
           })()
         : Promise.resolve([]),
+      // Retail sales stats (today)
+      retailEnabled
+        ? getSalesTodayStats(tenantId, 'RETAIL')
+        : Promise.resolve({ count: 0, revenue: 0, credit: 0 }),
+      // Wholesale sales stats (today)
+      wholesaleEnabled
+        ? getSalesTodayStats(tenantId, 'WHOLESALE')
+        : Promise.resolve({ count: 0, revenue: 0, credit: 0 }),
+      // Recent sales (last 5)
+      salesEnabled
+        ? (prisma as any).sale.findMany({
+            where: {
+              tenantId,
+              ...(retailEnabled && wholesaleEnabled
+                ? {}
+                : { mode: retailEnabled ? 'RETAIL' : 'WHOLESALE' }),
+            },
+            select: {
+              id: true,
+              saleNumber: true,
+              mode: true,
+              customerName: true,
+              totalAmount: true,
+              paymentStatus: true,
+              createdAt: true,
+              customer: { select: { name: true } },
+            },
+            orderBy: { createdAt: 'desc' },
+            take: 5,
+          })
+        : Promise.resolve([]),
+      // Sales chart data (last 7 days, daily revenue by mode)
+      salesEnabled
+        ? getSalesChartData(tenantId, retailEnabled, wholesaleEnabled)
+        : Promise.resolve([]),
     ]);
 
     const applyOverdue = (status: string, dueDate?: Date | null) => {
@@ -176,10 +228,26 @@ export const getStats = async (req: AuthRequest, res: Response) => {
           activeProjects: activeProjectsCount,
           inventoryValue,
           monthlyNet: Number(summary.monthlyNet),
+          retailSalesToday: retailStats.count,
+          retailRevenueToday: retailStats.revenue,
+          retailCreditOutstanding: retailStats.credit,
+          wholesaleSalesToday: wholesaleStats.count,
+          wholesaleRevenueToday: wholesaleStats.revenue,
+          wholesaleCreditOutstanding: wholesaleStats.credit,
         },
         lowStockAlerts: lowStockItems,
         recentProjects: recentProjectsWithStatus,
         bestSellingProducts,
+        recentSales: recentSales.map((s: any) => ({
+          id: s.id,
+          saleNumber: s.saleNumber,
+          mode: s.mode,
+          customerName: s.customer?.name ?? s.customerName ?? null,
+          totalAmount: Number(s.totalAmount),
+          paymentStatus: s.paymentStatus,
+          createdAt: s.createdAt,
+        })),
+        salesChartData,
       },
     });
   } catch (error) {
@@ -223,4 +291,96 @@ async function getFinancialSummary(tenantId: string) {
   return {
     monthlyNet: income - expense,
   };
+}
+
+async function getSalesTodayStats(tenantId: string, mode: 'RETAIL' | 'WHOLESALE') {
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+
+  const [countAndRevenue, creditOutstanding] = await Promise.all([
+    (prisma as any).sale.aggregate({
+      where: {
+        tenantId,
+        mode,
+        createdAt: { gte: todayStart },
+      },
+      _count: { id: true },
+      _sum: { totalAmount: true },
+    }),
+    (prisma as any).sale.aggregate({
+      where: {
+        tenantId,
+        mode,
+        paymentStatus: { in: ['CREDIT', 'PARTIAL'] },
+      },
+      _sum: { amountOwed: true },
+    }),
+  ]);
+
+  return {
+    count: countAndRevenue._count.id ?? 0,
+    revenue: Number(countAndRevenue._sum.totalAmount ?? 0),
+    credit: Number(creditOutstanding._sum.amountOwed ?? 0),
+  };
+}
+
+async function getSalesChartData(
+  tenantId: string,
+  retailEnabled: boolean,
+  wholesaleEnabled: boolean,
+) {
+  const days = 7;
+  const now = new Date();
+  const startDate = new Date(now);
+  startDate.setDate(startDate.getDate() - (days - 1));
+  startDate.setHours(0, 0, 0, 0);
+
+  const sales = await (prisma as any).sale.findMany({
+    where: {
+      tenantId,
+      createdAt: { gte: startDate },
+      ...(retailEnabled && wholesaleEnabled
+        ? {}
+        : { mode: retailEnabled ? 'RETAIL' : 'WHOLESALE' }),
+    },
+    select: {
+      mode: true,
+      totalAmount: true,
+      createdAt: true,
+    },
+  });
+
+  // Bucket by the shop's own calendar day, not by UTC. The window starts at local
+  // midnight, so converting to an ISO string here shifted every key back a day in
+  // any timezone ahead of UTC — which silently dropped today's sales, the ones a
+  // shop owner most wants to see.
+  const dayKey = (date: Date) => {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  };
+
+  const chartMap: Record<string, { retail: number; wholesale: number; count: number }> = {};
+  for (let i = 0; i < days; i++) {
+    const d = new Date(startDate);
+    d.setDate(d.getDate() + i);
+    chartMap[dayKey(d)] = { retail: 0, wholesale: 0, count: 0 };
+  }
+
+  for (const sale of sales) {
+    const key = dayKey(new Date(sale.createdAt));
+    if (!chartMap[key]) continue;
+    chartMap[key].count++;
+    if (sale.mode === 'RETAIL') {
+      chartMap[key].retail += Number(sale.totalAmount);
+    } else {
+      chartMap[key].wholesale += Number(sale.totalAmount);
+    }
+  }
+
+  return Object.entries(chartMap).map(([date, data]) => ({
+    date,
+    retail: data.retail,
+    wholesale: data.wholesale,
+    count: data.count,
+  }));
 }

@@ -4,3 +4,4 @@ _doc_extract
 .vscode
 .env
 .env.*
+category-create-error.log

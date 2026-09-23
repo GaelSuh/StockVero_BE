@@ -1,6 +1,6 @@
 import { Response, NextFunction } from 'express';
 import { verifyToken } from '../lib/jwt.js';
-import { UnauthorizedError, ForbiddenError } from '../lib/errors.js';
+import { UnauthorizedError, ForbiddenError, isDatabaseUnreachable } from '../lib/errors.js';
 import { AuthRequest } from '../types/index.js';
 import { UserRole } from '@prisma/client';
 import { prisma } from '../db.js';
@@ -92,6 +92,27 @@ export async function tenantGuard(req: AuthRequest, res: Response, next: NextFun
     if (error instanceof UnauthorizedError) {
       return res.status(401).json({ code: 'INVALID_TOKEN', error: error.message });
     }
+
+    // A database that cannot be reached is NOT a bad token. This block used to
+    // answer 401 INVALID_TOKEN for every exception, including the Prisma
+    // lookups above — so the moment the database blipped, every request in
+    // flight came back "your token is invalid" and the client dutifully signed
+    // the user out and sent them to the login screen. The token was fine the
+    // whole time; there was simply no database available to check its
+    // tokenVersion against.
+    //
+    // 503 is both honest and load-bearing: the client only ends a session on
+    // specific 401 codes, so a 5xx leaves the session alone and the user keeps
+    // working — which for an offline-capable till means queued sales survive a
+    // database outage instead of being stranded behind a login screen.
+    if (isDatabaseUnreachable(error)) {
+      console.error('[auth] database unreachable while verifying a token — returning 503, session kept');
+      return res.status(503).json({
+        code: 'SERVICE_UNAVAILABLE',
+        error: 'The server is temporarily unable to verify your session. Please try again shortly.',
+      });
+    }
+
     res.status(401).json({ code: 'INVALID_TOKEN', error: 'Invalid token' });
   }
 }

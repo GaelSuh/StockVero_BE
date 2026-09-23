@@ -8,6 +8,7 @@ import { parsePagination, buildPaginationMeta } from '../lib/pagination.js';
 import { isValidSlug } from '../lib/slug.js';
 import { generateTemporaryPassword } from '../lib/passwords.js';
 import { getDefaultTheme } from '../lib/theme.js';
+import { signPrivateFile } from '../lib/storage.js';
 import { logAuditAction } from '../services/audit.service.js';
 import {
   PRICING_MODULES,
@@ -443,6 +444,15 @@ export const getTenant = async (req: AdminRequest, res: Response) => {
           phone: tenant.phone,
           country: tenant.country,
           city: tenant.city,
+          // Identity evidence from signup. The document path itself is never
+          // sent to the client — only whether one exists. The image is fetched
+          // separately through the signed-URL route, so a page load does not
+          // hand out a durable pointer to someone's ID card.
+          verificationIdType: tenant.verificationIdType,
+          verificationIdNumber: tenant.verificationIdNumber,
+          verificationDocName: tenant.verificationDocName,
+          verificationDocMime: tenant.verificationDocMime,
+          hasVerificationDoc: Boolean(tenant.verificationDocPath),
           subscriptionPlan: tenant.subscriptionPlan,
           suspendedReason: tenant.suspendedReason,
           notes: tenant.notes,
@@ -1221,6 +1231,70 @@ export const resetTenantOwnerPassword = async (req: AdminRequest, res: Response)
       success: false,
       message: 'Failed to reset password',
       error: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+};
+
+/**
+ * GET /api/admin/v1/tenants/:id/verification-document
+ *
+ * Issues a short-lived signed URL for a tenant's signup identity document.
+ *
+ * This is the only way that object can be read. It lives in the private bucket,
+ * so its path is not fetchable on its own, and the path is never sent to any
+ * client — the URL is minted per request, for an authenticated admin, and
+ * expires in ten minutes. Each issue is written to the audit log, because
+ * looking at someone's ID card is an access worth recording.
+ */
+export const getTenantVerificationDocument = async (req: AdminRequest, res: Response) => {
+  try {
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: req.params.id },
+      select: {
+        id: true,
+        name: true,
+        verificationDocPath: true,
+        verificationDocName: true,
+        verificationDocMime: true,
+      },
+    });
+    if (!tenant) {
+      return res.status(404).json({ success: false, message: 'Tenant not found' });
+    }
+    if (!tenant.verificationDocPath) {
+      return res.status(404).json({
+        success: false,
+        message: 'This account did not submit an identity document.',
+      });
+    }
+
+    const signedUrl = await signPrivateFile(tenant.verificationDocPath);
+    if (!signedUrl) {
+      return res.status(502).json({
+        success: false,
+        message: 'Could not open that document right now. Please try again in a moment.',
+      });
+    }
+
+    await logAuditAction(req.admin!.id, tenant.id, 'TENANT_VERIFICATION_DOC_VIEWED', {
+      tenantName: tenant.name,
+      fileName: tenant.verificationDocName,
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        url: signedUrl,
+        fileName: tenant.verificationDocName,
+        mimeType: tenant.verificationDocMime,
+        expiresInSeconds: 600,
+      },
+    });
+  } catch (error) {
+    console.error('Error signing tenant verification document:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to open the document',
     });
   }
 };

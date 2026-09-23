@@ -1,10 +1,12 @@
 import { Response } from 'express';
+import { ORGANIZATION_TYPES, INDUSTRIES } from '../config/industries.js';
 import { z } from 'zod';
 import { prisma } from '../db.js';
 import { AuthRequest } from '../types/index.js';
 import { resolveSignedUrl, deleteStoredFile } from '../lib/storage.js';
 import { broadcastToModule } from '../services/notificationService.js';
 import { logAudit, extractRequestContext, AuditActorType } from '../services/auditService.js';
+import { readTenantSettings } from '../lib/tenantSettings.js';
 
 const UpdateModuleSchema = z.object({
   isEnabled: z.boolean(),
@@ -44,8 +46,12 @@ export const getTenantModules = async (req: AuthRequest, res: Response) => {
 const UpdateTenantMeSchema = z.object({
   name: z.string().min(1).optional(),
   industry: z.string().optional(),
+  /** Business type. Drives suggested modules; never restricts them. */
+  organizationType: z.enum(ORGANIZATION_TYPES as [string, ...string[]]).optional(),
   website: z.string().optional(),
   logoUrl: z.string().nullable().optional(),
+  /** Owner-controlled: put stock purchases in front of finance before units land. */
+  stockApprovalRequired: z.boolean().optional(),
 });
 
 export const updateMyTenant = async (req: AuthRequest, res: Response) => {
@@ -58,10 +64,24 @@ export const updateMyTenant = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const { name, industry, website, logoUrl } = parsed.data;
+    const { name, industry, organizationType, website, logoUrl, stockApprovalRequired } = parsed.data;
     const updates: Record<string, any> = {};
+
+    // Merged rather than replaced — settingsConfig is a shared bag and other
+    // keys will land in it later.
+    if (stockApprovalRequired !== undefined) {
+      const current = await prisma.tenant.findUnique({
+        where: { id: req.tenantId! },
+        select: { settingsConfig: true },
+      });
+      updates.settingsConfig = {
+        ...(readTenantSettings(current) as Record<string, unknown>),
+        stockApprovalRequired,
+      };
+    }
     if (name !== undefined) updates.name = name;
     if (industry !== undefined) updates.industry = industry || null;
+    if (organizationType !== undefined) updates.organizationType = organizationType;
     if (website !== undefined) updates.website = website || null;
     if (logoUrl !== undefined) updates.logoUrl = logoUrl;
 
@@ -78,7 +98,18 @@ export const updateMyTenant = async (req: AuthRequest, res: Response) => {
     const updated = await prisma.tenant.update({
       where: { id: req.tenantId! },
       data: updates,
-      select: { id: true, name: true, industry: true, website: true, logoUrl: true },
+      // organizationType is selected back deliberately: it was being written and
+      // then omitted from the response, so the client could not tell whether the
+      // change had taken.
+      select: {
+        id: true,
+        name: true,
+        industry: true,
+        organizationType: true,
+        website: true,
+        logoUrl: true,
+        settingsConfig: true,
+      },
     });
 
     // Notify authorized users
@@ -209,12 +240,26 @@ export const updateTenantModule = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const updated = await prisma.tenantModule.update({
+    // upsert, not update: a module the tenant never selected at signup has no
+    // row at all, so switching it on later failed with a record-not-found error
+    // rather than enabling anything.
+    //
+    // Disabling only flips the flag. Nothing is deleted — the module disappears
+    // from the menu and its routes are refused, and switching it back on brings
+    // everything with it.
+    const updated = await prisma.tenantModule.upsert({
       where: { tenantId_moduleKey: { tenantId, moduleKey: req.params.key } },
-      data: {
+      update: {
         isEnabled: parsed.data.isEnabled,
         enabledAt: parsed.data.isEnabled ? new Date() : undefined,
         disabledAt: parsed.data.isEnabled ? null : new Date(),
+      },
+      create: {
+        tenantId,
+        moduleKey: req.params.key,
+        isEnabled: parsed.data.isEnabled,
+        enabledAt: parsed.data.isEnabled ? new Date() : undefined,
+        disabledAt: parsed.data.isEnabled ? undefined : new Date(),
       },
     });
 
@@ -239,4 +284,15 @@ export const updateTenantModule = async (req: AuthRequest, res: Response) => {
       error: error instanceof Error ? error.message : 'Unknown error',
     });
   }
+};
+
+/**
+ * The business types on offer, with the modules each suggests.
+ *
+ * Served rather than duplicated as a constant in the client so the two cannot
+ * drift: this file decides what may be stored, so it should also decide what is
+ * offered.
+ */
+export const listIndustries = async (_req: AuthRequest, res: Response) => {
+  return res.json({ success: true, data: INDUSTRIES });
 };

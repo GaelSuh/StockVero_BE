@@ -1,0 +1,48 @@
+-- Product Variants, phase 1 (items 1-2 of the build prompt).
+--
+-- Two things happen here, only one of which is DDL:
+--
+-- 1. Schema/database drift reconciliation -- NO DDL.
+--    Three partial unique indexes already existed in the database, added by
+--    earlier hand-written migration SQL, but schema.prisma could not describe
+--    them and so disagreed with reality:
+--
+--      inventory_categories_tenant_id_barcode_key
+--        (tenant_id, barcode) WHERE barcode IS NOT NULL
+--      category_stock_logs_tenant_id_offline_id_key
+--        (tenant_id, offline_id) WHERE offline_id IS NOT NULL
+--      price_lists_one_default_per_tenant
+--        (tenant_id) WHERE is_default
+--
+--    Prisma 7 CAN express these, via the `partialIndexes` preview feature and
+--    `@@unique([...], where: raw("..."))`. They are now declared in
+--    schema.prisma and match the database exactly, which is why this file
+--    contains no SQL for them: there is nothing to change. The drift is closed
+--    by making the schema honest, not by touching the database.
+--
+--    Consequence to know about: while `partialIndexes` is enabled, Prisma sees
+--    partial indexes. An undeclared one would be DROPPED by a future
+--    migration. All three are declared. (Verified: with only one declared,
+--    `migrate diff` proposed dropping the other two -- including
+--    price_lists_one_default_per_tenant with no replacement.)
+--
+-- 2. system_id uniqueness rescoped from global to per-tenant -- the DDL below.
+--    {ABBR}-{YYYYMMDD}-{seq} is a per-tenant human-readable document number.
+--    Two tenants can independently choose the same category abbreviation, and
+--    under the global constraint the second tenant's first unit of a given day
+--    collided with the first tenant's. Per-tenant is what this identifier
+--    always meant.
+--
+--    Widening only: every row that satisfied the old global constraint
+--    satisfies the new per-tenant one, so no data can violate this and no
+--    backfill is required.
+--
+--    product_items_system_id_key is a plain unique INDEX (not a table
+--    constraint -- pg_constraint lists only the two FKs and the PK for this
+--    table), so DROP INDEX is the correct removal.
+
+-- DropIndex
+DROP INDEX "product_items_system_id_key";
+
+-- CreateIndex
+CREATE UNIQUE INDEX "product_items_tenant_id_system_id_key" ON "product_items"("tenant_id", "system_id");

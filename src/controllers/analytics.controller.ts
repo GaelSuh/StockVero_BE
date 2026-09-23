@@ -218,10 +218,81 @@ export const getAnalyticsOverview = async (req: AuthRequest, res: Response) => {
       prisma.project.count({ where: { tenantId, status: 'IN_PROGRESS' } }),
     ]);
 
+    // ── Sales ───────────────────────────────────────────────────────────────
+    // This endpoint reported on projects, finance and customers but never on
+    // sales, so a shop that only sells over a counter saw an analytics page with
+    // nothing about its actual trade in it.
+    const salesRows = await prisma.sale.findMany({
+      where: {
+        tenantId,
+        status: { in: ['COMPLETED', 'PARTIAL'] },
+        createdAt: { gte: start, lt: end },
+      },
+      select: {
+        mode: true,
+        totalAmount: true,
+        createdAt: true,
+        items: { select: { productName: true, quantity: true, lineTotal: true } },
+        payments: { select: { method: true, amount: true } },
+      },
+    });
+
+    const salesMonthly = MONTH_NAMES.map((name) => ({
+      month: name,
+      retail: 0,
+      wholesale: 0,
+      total: 0,
+      orders: 0,
+    }));
+    const paymentMix: Record<string, number> = {};
+    const productSales = new Map<string, { name: string; quantity: number; revenue: number }>();
+
+    for (const sale of salesRows) {
+      const bucket = salesMonthly[new Date(sale.createdAt).getMonth()];
+      const amount = Number(sale.totalAmount);
+      bucket.total += amount;
+      bucket.orders += 1;
+      if (sale.mode === 'WHOLESALE') bucket.wholesale += amount;
+      else bucket.retail += amount;
+
+      for (const p of sale.payments) {
+        paymentMix[p.method] = (paymentMix[p.method] ?? 0) + Number(p.amount);
+      }
+      for (const item of sale.items) {
+        const entry = productSales.get(item.productName) ?? {
+          name: item.productName,
+          quantity: 0,
+          revenue: 0,
+        };
+        entry.quantity += item.quantity;
+        entry.revenue += Number(item.lineTotal);
+        productSales.set(item.productName, entry);
+      }
+    }
+
+    const salesRevenue = salesRows.reduce((sum, s) => sum + Number(s.totalAmount), 0);
+    const salesAnalytics = {
+      totalRevenue: salesRevenue,
+      orderCount: salesRows.length,
+      averageOrder: salesRows.length ? salesRevenue / salesRows.length : 0,
+      itemsSold: salesRows.reduce(
+        (sum, s) => sum + s.items.reduce((n, i) => n + i.quantity, 0),
+        0,
+      ),
+      monthly: salesMonthly,
+      paymentMix: Object.entries(paymentMix)
+        .map(([method, amount]) => ({ method, amount }))
+        .sort((a, b) => b.amount - a.amount),
+      topSellingProducts: [...productSales.values()]
+        .sort((a, b) => b.revenue - a.revenue)
+        .slice(0, 8),
+    };
+
     return res.json({
       success: true,
       message: 'Analytics retrieved successfully',
       data: {
+        salesAnalytics,
         monthlyPerformance,
         projectStatus,
         customerGrowth,

@@ -18,6 +18,22 @@ const TransactionSchema = z.object({
   status: z.enum(['PENDING', 'ACCEPTED', 'REJECTED']).optional(),
 });
 
+/**
+ * A transaction cannot predate the tenant it belongs to, and recording one in
+ * the future breaks time-bucketed reporting. Shared by create and update so
+ * the same rule can't be skipped by editing a transaction's date after the
+ * fact.
+ */
+async function validateTransactionDate(tenantId: string, recordedAt: Date): Promise<string | null> {
+  if (Number.isNaN(recordedAt.getTime())) return 'Invalid transaction date';
+  if (recordedAt.getTime() > Date.now()) return 'Transaction date cannot be in the future';
+  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { createdAt: true } });
+  if (tenant && recordedAt.getTime() < tenant.createdAt.getTime()) {
+    return 'Transaction date cannot be before the business was created';
+  }
+  return null;
+}
+
 export const createTransaction = async (req: AuthRequest, res: Response) => {
   try {
     const parsed = TransactionSchema.safeParse(req.body);
@@ -25,6 +41,11 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ success: false, message: parsed.error.issues[0]?.message || 'Invalid payload' });
     }
     const data = parsed.data;
+    const recordedAt = data.recordedAt ? new Date(data.recordedAt) : new Date();
+    const dateError = await validateTransactionDate(req.tenantId!, recordedAt);
+    if (dateError) {
+      return res.status(400).json({ success: false, message: dateError });
+    }
     const isOwner = req.user?.accountType === 'owner';
     const nextStatus = isOwner ? (data.status ?? 'PENDING') : 'PENDING';
     const transaction = await prisma.$transaction(async (tx) => {
@@ -47,7 +68,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
           category: data.category,
           moduleRef: data.moduleRef,
           entityId: data.entityId,
-          recordedAt: data.recordedAt ? new Date(data.recordedAt) : new Date(),
+          recordedAt,
           isAutomatic: false,
         },
       });
@@ -258,6 +279,12 @@ export const updateTransaction = async (req: AuthRequest, res: Response) => {
     if (!existing) return res.status(404).json({ success: false, message: 'Transaction not found' });
     if (existing.isAutomatic) return res.status(400).json({ success: false, message: 'Cannot modify automatic transactions' });
     const data = parsed.data;
+    if (data.recordedAt) {
+      const dateError = await validateTransactionDate(req.tenantId!, new Date(data.recordedAt));
+      if (dateError) {
+        return res.status(400).json({ success: false, message: dateError });
+      }
+    }
     const isOwner = req.user?.accountType === 'owner';
     if (data.status && !isOwner) return res.status(403).json({ success: false, message: 'Only the tenant owner can update transaction status' });
     const transaction = await prisma.$transaction(async (tx) => {
@@ -552,14 +579,30 @@ export const getAvailableTransactionsForLinking = async (req: AuthRequest, res: 
   try {
     const tenantId = req.tenantId!;
     const customerId = req.query.customerId ? String(req.query.customerId) : undefined;
+    const projectId = req.query.projectId ? String(req.query.projectId) : undefined;
 
     const where: any = {
       tenantId,
       type: 'INCOME',
       status: 'ACCEPTED',
       invoicePaymentId: null,
+      // A sale's own income is already accounted for by that sale — now that
+      // it also carries the customer's id (for the customer's Finance tab),
+      // it would otherwise show up here too and could be linked a second
+      // time against an unrelated invoice, double-counting the same money.
+      // `moduleRef: { notIn }` alone would silently exclude every ordinary
+      // manual transaction too — NOT IN treats a null moduleRef as unknown,
+      // not "not in the list", in plain SQL semantics.
+      OR: [
+        { moduleRef: null },
+        { moduleRef: { notIn: ['retail_sales', 'wholesale_sales'] } },
+      ],
     };
-    if (customerId) where.customerId = customerId;
+    // A project invoice payment must come from income recorded against that
+    // project — filtering by customerId alone let a transaction from an
+    // unrelated project (or none at all) show up for linking here.
+    if (projectId) where.projectId = projectId;
+    else if (customerId) where.customerId = customerId;
 
     const transactions = await (prisma as any).transaction.findMany({
       where,
