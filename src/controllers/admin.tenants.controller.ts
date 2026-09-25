@@ -77,6 +77,10 @@ const UpdateOwnerSchema = z.object({
 });
 
 const allowedModuleKeys = new Set<string>(PRICING_MODULE_KEYS);
+// Toggling a tenant's modules covers the whole catalog, not just the paid ones:
+// tenants also hold free system modules (administration, audit, billing,
+// settings) and the admin UI sends every row back on save.
+const toggleableModuleKeys = new Set<string>(MODULES_CONFIG.map(m => m.key));
 
 export const listTenants = async (req: AdminRequest, res: Response) => {
   try {
@@ -1004,7 +1008,7 @@ export const updateTenantModules = async (req: AdminRequest, res: Response) => {
 
     const unknownKeys = normalizedUpdates
       .map(m => m.moduleKey)
-      .filter(key => !allowedModuleKeys.has(key));
+      .filter(key => !toggleableModuleKeys.has(key));
     if (unknownKeys.length > 0) {
       return res.status(422).json({
         success: false,
