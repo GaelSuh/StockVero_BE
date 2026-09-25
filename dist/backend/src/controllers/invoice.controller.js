@@ -343,6 +343,18 @@ export const sendClientInvoice = async (req, res) => {
             },
             include: { lineItems: { orderBy: { sortOrder: 'asc' } } },
         });
+        void logAudit({
+            tenantId: req.tenantId,
+            actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+            actorId: req.user?.id,
+            action: 'INVOICE_SENT',
+            module: 'invoices',
+            entityType: 'Invoice',
+            entityId: invoice.id,
+            entityLabel: invoice.invoiceNumber ?? invoice.id,
+            details: { previousStatus: 'DRAFT', newStatus: 'PENDING' },
+            ...extractRequestContext(req),
+        });
         return res.json({
             success: true,
             message: 'Invoice sent successfully',
@@ -432,6 +444,40 @@ export const getInvoicePdfData = async (req, res) => {
         return res.status(500).json({
             success: false,
             message: 'Failed to retrieve invoice PDF data',
+            error: error instanceof Error ? error.message : 'Unknown error',
+        });
+    }
+};
+// ── deleteInvoice ─────────────────────────────────────────────────────────────
+export const deleteInvoice = async (req, res) => {
+    try {
+        const invoice = await prisma.invoice.findFirst({
+            where: { id: req.params.id, tenantId: req.tenantId },
+            select: { id: true, invoiceNumber: true, status: true },
+        });
+        if (!invoice) {
+            return res.status(404).json({ success: false, message: 'Invoice not found' });
+        }
+        await prisma.invoice.delete({ where: { id: invoice.id } });
+        void logAudit({
+            tenantId: req.tenantId,
+            actorType: req.user?.accountType === 'owner' ? AuditActorType.OWNER : AuditActorType.EMPLOYEE,
+            actorId: req.user?.id,
+            action: 'INVOICE_DELETED',
+            module: 'finance',
+            entityType: 'Invoice',
+            entityId: invoice.id,
+            entityLabel: invoice.invoiceNumber,
+            details: { status: invoice.status },
+            ...extractRequestContext(req),
+        });
+        return res.json({ success: true, message: `Invoice "${invoice.invoiceNumber}" has been permanently deleted.` });
+    }
+    catch (error) {
+        console.error('Error deleting invoice:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Failed to delete invoice',
             error: error instanceof Error ? error.message : 'Unknown error',
         });
     }

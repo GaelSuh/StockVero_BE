@@ -1,6 +1,17 @@
 import { Response } from 'express';
 import { z } from 'zod';
 import { AuthRequest } from '../types/index.js';
+/**
+ * True when Prisma rejected a write for violating a unique constraint that
+ * involves `column`.
+ *
+ * Prisma signals this as code P2002. Reading the code is stable; matching the
+ * human-readable message is not — "Unique constraint failed on the fields:
+ * (`tenant_id`, `sku`)" names the columns rather than the index and capitalises
+ * differently than you would guess, which is what let every duplicate
+ * abbreviation surface as a 500 instead of the 409 meant for it.
+ */
+export declare function isUniqueViolationOn(error: unknown, column: string): boolean;
 export declare const fetchCategoryById: (tenantId: string, id: string) => any;
 /**
  * Record a category-level stock event with before/after available counts.
@@ -24,6 +35,18 @@ export declare const CategorySchema: z.ZodObject<{
         STOCK: "STOCK";
         INVENTORY: "INVENTORY";
     }>>;
+    barcode: z.ZodUnion<[z.ZodOptional<z.ZodString>, z.ZodLiteral<"">]>;
+    productCategoryId: z.ZodUnion<[z.ZodOptional<z.ZodString>, z.ZodLiteral<"">]>;
+    unit: z.ZodUnion<[z.ZodOptional<z.ZodString>, z.ZodLiteral<"">]>;
+    stockTrackingMode: z.ZodEnum<{
+        SERIALIZED: "SERIALIZED";
+        QUANTITY: "QUANTITY";
+    }>;
+    hasUniquePerUnitBarcode: z.ZodOptional<z.ZodBoolean>;
+    retailEnabled: z.ZodOptional<z.ZodBoolean>;
+    wholesaleEnabled: z.ZodOptional<z.ZodBoolean>;
+    quantityOnHand: z.ZodOptional<z.ZodCoercedNumber<unknown>>;
+    isNewPurchase: z.ZodOptional<z.ZodBoolean>;
     description: z.ZodOptional<z.ZodString>;
     supplier: z.ZodOptional<z.ZodString>;
     costPrice: z.ZodOptional<z.ZodCoercedNumber<unknown>>;
@@ -54,6 +77,7 @@ export declare const ProductItemCreateSchema: z.ZodObject<{
     }>;
     userIdentifier: z.ZodOptional<z.ZodString>;
     notes: z.ZodOptional<z.ZodString>;
+    variantId: z.ZodOptional<z.ZodString>;
     status: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const listCategories: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;

@@ -326,7 +326,7 @@ model PaymentMethod {
 model PaymentTransaction {
   id              String                   @id @default(uuid())
   tenantId        String                   @map("tenant_id")
-  subscriptionId  String                   @map("subscription_id")
+  subscriptionId  String?                  @map("subscription_id")
   paymentMethodId String?                  @map("payment_method_id")
   amount          Decimal                  @db.Decimal(15, 2)
   currency        String                   @default("XAF")
@@ -338,13 +338,24 @@ model PaymentTransaction {
   paidAt          DateTime?                @map("paid_at")
   createdAt       DateTime                 @default(now()) @map("created_at")
   updatedAt       DateTime                 @updatedAt @map("updated_at")
+  // Campay gateway fields (20260720000000_campay_payment_gateway).
+  provider          PaymentProvider @default(NONE)
+  providerReference String?         @unique @map("provider_reference")
+  externalReference String?         @map("external_reference")
+  providerStatus    String?         @map("provider_status")
+  payerPhone        String?         @map("payer_phone")
+  operator          String?
+  operatorReference String?         @map("operator_reference")
+  ussdCode          String?         @map("ussd_code")
+  providerPayload   Json?           @map("provider_payload")
   paymentMethod   PaymentMethod?           @relation(fields: [paymentMethodId], references: [id])
-  subscription    Subscription             @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  subscription    Subscription?            @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
   tenant          Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@index([tenantId])
   @@index([subscriptionId])
   @@index([paymentMethodId])
+  @@index([externalReference])
   @@map("payment_transactions")
 }
 
@@ -1177,6 +1188,12 @@ enum PaymentTransactionType {
   MODULE_ADDED
   MANUAL_CHARGE
   REFUND
+  SIGNUP_CHARGE
+}
+
+enum PaymentProvider {
+  NONE
+  CAMPAY
 }
 
 enum InventoryStatus {
@@ -1224,6 +1241,10 @@ enum StockItemStatus {
   UNDER_MAINTENANCE
   FAULTY
   COMPLETELY_BAD
+  /// Added in production by 20260720000000_campay_payment_gateway; the older
+  /// sale flow marked sold units SOLD. Current code marks them DEPLOYED, but
+  /// existing SOLD rows must stay readable.
+  SOLD
 }
 
 /// Status values used when the parent category is of type INVENTORY.

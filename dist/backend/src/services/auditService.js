@@ -3,12 +3,21 @@ import { AuditActorType, AuditStatus } from '@prisma/client';
 export { AuditActorType, AuditStatus };
 export async function logAudit(params) {
     try {
+        // If actorName was not provided but we have an actorId, look it up so the
+        // audit log never shows "Unknown" for a real person.
+        let actorName = params.actorName;
+        if (!actorName && params.actorId) {
+            actorName = await resolveActorNameFromDb(params.actorType, params.actorId);
+        }
+        if (!actorName) {
+            actorName = resolveActorNameFallback(params.actorType);
+        }
         await prisma.auditLog.create({
             data: {
                 tenantId: params.tenantId,
                 actorType: params.actorType,
                 actorId: params.actorId,
-                actorName: params.actorName ?? resolveActorName(params.actorType),
+                actorName,
                 action: params.action,
                 module: params.module,
                 status: params.status ?? AuditStatus.SUCCESS,
@@ -27,7 +36,31 @@ export async function logAudit(params) {
         console.error('[AuditLog] Failed to write audit entry:', err);
     }
 }
-function resolveActorName(type) {
+async function resolveActorNameFromDb(type, actorId) {
+    try {
+        if (type === AuditActorType.OWNER) {
+            const user = await prisma.user.findUnique({
+                where: { id: actorId },
+                select: { firstName: true, lastName: true },
+            });
+            if (user)
+                return `${user.firstName} ${user.lastName}`;
+        }
+        else if (type === AuditActorType.EMPLOYEE) {
+            const emp = await prisma.employee.findUnique({
+                where: { id: actorId },
+                select: { firstName: true, lastName: true },
+            });
+            if (emp)
+                return `${emp.firstName} ${emp.lastName}`;
+        }
+    }
+    catch {
+        // Non-critical — fall through to fallback
+    }
+    return null;
+}
+function resolveActorNameFallback(type) {
     if (type === AuditActorType.SYSTEM)
         return 'System (Automatic)';
     return 'Unknown';
