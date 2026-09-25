@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { tenantGuard, roleGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
+import { tenantGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
 import {
   getTenantModules,
   updateTenantModule,
@@ -39,7 +39,11 @@ router.use(tenantGuard, mustChangePasswordGuard);
  */
 router.patch('/me', permissionGuard('settings', 'canUpdate'), updateMyTenant);
 router.patch('/me/theme', permissionGuard('settings', 'canUpdate'), updateMyTenantTheme);
-router.get('/:id/modules', roleGuard(['SUPER_ADMIN', 'CLIENT_OWNER']), getTenantModules);
+// Same gate as the rest of Settings: owners always, employees with the settings
+// permission. The old roleGuard(['SUPER_ADMIN', 'CLIENT_OWNER']) refused every
+// employee (their tokens carry no role) even though the Settings screen offers
+// them the Modules tab, so saving answered 403.
+router.get('/:id/modules', permissionGuard('settings', 'canRead'), getTenantModules);
 
 /**
  * @openapi
@@ -72,6 +76,6 @@ router.get('/:id/modules', roleGuard(['SUPER_ADMIN', 'CLIENT_OWNER']), getTenant
  *       200:
  *         description: Module updated
  */
-router.patch('/:id/modules/:key', roleGuard(['SUPER_ADMIN', 'CLIENT_OWNER']), updateTenantModule);
+router.patch('/:id/modules/:key', permissionGuard('settings', 'canUpdate'), updateTenantModule);
 
 export default router;
