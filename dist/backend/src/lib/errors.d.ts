@@ -18,3 +18,4 @@ export declare class NotFoundError extends ApiError {
 export declare class ConflictError extends ApiError {
     constructor(message: string);
 }
+export declare function isDatabaseUnreachable(error: unknown): boolean;

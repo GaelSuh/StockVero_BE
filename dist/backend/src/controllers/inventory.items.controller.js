@@ -4,9 +4,56 @@ import { broadcastToModule } from '../services/notificationService.js';
 import { createPurchaseInvoice, deductUnitCost } from '../services/invoiceService.js';
 import { generateSystemId } from '../utils/generateSystemId.js';
 import { deleteStorageFiles } from '../lib/storage.js';
+import { getAvailableStock, isQuantityTracked, resolveStockStatus } from '../lib/stock.js';
+import { stockApprovalRequired } from '../lib/tenantSettings.js';
+import { addQuantityStock } from '../services/quantityStockService.js';
+import { resolveChannelFlags, channelsAreValid, CHANNELS_REQUIRED_MESSAGE, } from '../lib/channels.js';
 import { logAudit, extractRequestContext, buildDiff, AuditActorType } from '../services/auditService.js';
+/**
+ * True when Prisma rejected a write for violating a unique constraint that
+ * involves `column`.
+ *
+ * Prisma signals this as code P2002. Reading the code is stable; matching the
+ * human-readable message is not — "Unique constraint failed on the fields:
+ * (`tenant_id`, `sku`)" names the columns rather than the index and capitalises
+ * differently than you would guess, which is what let every duplicate
+ * abbreviation surface as a 500 instead of the 409 meant for it.
+ */
+export function isUniqueViolationOn(error, column) {
+    const e = error;
+    if (e?.code !== 'P2002')
+        return false;
+    // Where the offending columns live depends on how the client reached the
+    // database. Classic Prisma puts them in meta.target; under a driver adapter
+    // (Prisma 7, which is what we run) they are nested in the underlying driver
+    // error instead, and meta.target is absent entirely.
+    const adapterCause = e.meta?.driverAdapterError?.cause;
+    const raw = e.meta?.target ?? adapterCause?.constraint?.fields;
+    const columns = Array.isArray(raw) ? raw.map(String) : raw ? [String(raw)] : [];
+    const needle = column.toLowerCase();
+    if (columns.some((c) => c.toLowerCase().includes(needle)))
+        return true;
+    // Last resort: the driver's own message names the constraint.
+    return String(adapterCause?.originalMessage ?? '').toLowerCase().includes(needle);
+}
+/**
+ * A ProductItem carries exactly one of these, depending on its category type.
+ * They overlap but are not identical: DEPLOYED is stock-only (also covers a
+ * sold unit — there is no separate SOLD status), IN_USE is inventory-only.
+ */
+const STOCK_ITEM_STATUSES = new Set([
+    'AVAILABLE', 'DEPLOYED', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD',
+]);
+const INVENTORY_ITEM_STATUSES = new Set([
+    'AVAILABLE', 'IN_USE', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD',
+]);
 // ── Shared helpers ─────────────────────────────────────────────────────────────
-export const fetchCategoryById = (tenantId, id) => prisma.inventoryCategory.findFirst({ where: { tenantId, id } });
+export const fetchCategoryById = (tenantId, id) => prisma.inventoryCategory.findFirst({
+    where: { tenantId, id },
+    // _count.variants lets formatCategory tell "no variants" apart from
+    // "variants not loaded" the same way the list endpoint already does.
+    include: { productCategory: true, _count: { select: { variants: true } } },
+});
 // ── Stock event logger ────────────────────────────────────────────────────────
 const STATUS_AVAILABLE = 'AVAILABLE';
 const STOCK_STATUSES = new Set(['AVAILABLE', 'DEPLOYED', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD']);
@@ -89,6 +136,29 @@ export const CategorySchema = z.object({
     name: z.string().min(1),
     abbreviation: z.string().min(1).max(8),
     type: z.enum(['STOCK', 'INVENTORY']).optional(),
+    barcode: z.string().max(64).optional().or(z.literal('')),
+    productCategoryId: z.string().optional().or(z.literal('')),
+    unit: z.string().max(24).optional().or(z.literal('')),
+    /**
+     * Required on create. Left optional it silently resolved to SERIALIZED, which
+     * gave quantity products per-unit tracking nobody chose and no way back —
+     * the mode is fixed once units and stock logs exist against it.
+     * `CategorySchema.partial()` on update keeps this optional there.
+     */
+    stockTrackingMode: z.enum(['SERIALIZED', 'QUANTITY'], {
+        error: 'Choose how this product is counted',
+    }),
+    /** Set the first time stock is received by scanning; remembered thereafter. */
+    hasUniquePerUnitBarcode: z.boolean().optional(),
+    /**
+     * Sales channels. Omitted means "both", which is what every product was
+     * implicitly available on before these existed.
+     */
+    retailEnabled: z.boolean().optional(),
+    wholesaleEnabled: z.boolean().optional(),
+    quantityOnHand: z.coerce.number().int().nonnegative().optional(),
+    /** False when recording stock the business already owns — no expense is booked. */
+    isNewPurchase: z.boolean().optional(),
     description: z.string().optional(),
     supplier: z.string().optional(),
     costPrice: z.coerce.number().nonnegative().optional(),
@@ -110,6 +180,9 @@ export const ProductItemCreateSchema = z.object({
     identifierMode: z.enum(['manual', 'auto']),
     userIdentifier: z.string().optional(),
     notes: z.string().optional(),
+    /** Which option of the product this unit is. Absent = the product has no
+     * variants, which is every product until one is created for it. */
+    variantId: z.string().optional(),
     // Accept any valid status string — validated at runtime against category type
     status: z.string().optional(),
 });
@@ -117,6 +190,15 @@ const ProductItemUpdateSchema = z.object({
     name: z.string().optional(),
     userIdentifier: z.string().optional(),
     notes: z.string().optional(),
+    /**
+     * Which option this unit is. Assignable after the fact, not just at
+     * creation: a product's variants are often defined after its stock already
+     * exists, and without this those units could never be attributed — every
+     * variant would read zero available while the shelf was full, and the
+     * authorised-quantity cap blocks deleting and re-adding them.
+     * Empty string clears it back to un-attributed.
+     */
+    variantId: z.string().optional(),
     // Accept any string — validated at runtime against category type
     status: z.string().optional(),
     imageUrl: z.string().url().optional().or(z.literal('')),
@@ -165,13 +247,37 @@ const buildCategoryStats = async (tenantId, categoryId, categoryType) => {
         faultyCount,
     };
 };
+/**
+ * Sum of every variant's own quantityOnHand, per category. A QUANTITY
+ * product's variants each carry their own counter (see
+ * assertVariantQuantityWithinCeiling in variants.controller.ts) and a sale
+ * deducts from the variant, never from the category's own quantityOnHand
+ * column — so once a product has variants, this sum, not the category's own
+ * column, is the number that is actually still true. Categories with no
+ * variants are simply absent from the result (sum of nothing), which callers
+ * must tell apart from "has variants, all sold out" using variantCount / the
+ * category's own _count.variants — never treat a missing entry as 0 stock.
+ */
+const getVariantQuantitySums = async (tenantId, categoryIds) => {
+    if (categoryIds.length === 0)
+        return {};
+    const rows = await prisma.productVariant.groupBy({
+        by: ['categoryId'],
+        where: { tenantId, categoryId: { in: categoryIds } },
+        _sum: { quantityOnHand: true },
+    });
+    const map = {};
+    for (const row of rows)
+        map[row.categoryId] = row._sum.quantityOnHand ?? 0;
+    return map;
+};
 /** Batch version: builds stats for ALL given categories in ~6 queries total instead of 5 × N. */
 const buildBatchCategoryStats = async (tenantId, categories) => {
     const categoryIds = categories.map(c => c.id);
     if (categoryIds.length === 0)
         return new Map();
-    // 6 total queries regardless of N categories
-    const [totalByCategory, stockAvailable, invAvailable, stockDeployed, invInUse, stockMaintenance, invMaintenance, stockFaulty, invFaulty,] = await Promise.all([
+    // 7 total queries regardless of N categories
+    const [totalByCategory, stockAvailable, invAvailable, stockDeployed, invInUse, stockMaintenance, invMaintenance, stockFaulty, invFaulty, variantQuantitySums,] = await Promise.all([
         prisma.productItem.groupBy({ by: ['categoryId'], where: { tenantId, categoryId: { in: categoryIds } }, _count: { id: true } }),
         prisma.productItem.groupBy({ by: ['categoryId'], where: { tenantId, categoryId: { in: categoryIds }, stockStatus: 'AVAILABLE' }, _count: { id: true } }),
         prisma.productItem.groupBy({ by: ['categoryId'], where: { tenantId, categoryId: { in: categoryIds }, inventoryStatus: 'AVAILABLE' }, _count: { id: true } }),
@@ -181,6 +287,7 @@ const buildBatchCategoryStats = async (tenantId, categories) => {
         prisma.productItem.groupBy({ by: ['categoryId'], where: { tenantId, categoryId: { in: categoryIds }, inventoryStatus: 'UNDER_MAINTENANCE' }, _count: { id: true } }),
         prisma.productItem.groupBy({ by: ['categoryId'], where: { tenantId, categoryId: { in: categoryIds }, stockStatus: { in: ['FAULTY', 'COMPLETELY_BAD'] } }, _count: { id: true } }),
         prisma.productItem.groupBy({ by: ['categoryId'], where: { tenantId, categoryId: { in: categoryIds }, inventoryStatus: { in: ['FAULTY', 'COMPLETELY_BAD'] } }, _count: { id: true } }),
+        getVariantQuantitySums(tenantId, categoryIds),
     ]);
     const toMap = (groups) => {
         const m = {};
@@ -208,25 +315,38 @@ const buildBatchCategoryStats = async (tenantId, categories) => {
                 : { inUseCount: invInUseMap[cat.id] ?? 0 }),
             maintenanceCount: isStock ? (stockMaintMap[cat.id] ?? 0) : (invMaintMap[cat.id] ?? 0),
             faultyCount: isStock ? (stockFaultyMap[cat.id] ?? 0) : (invFaultyMap[cat.id] ?? 0),
+            variantQuantitySum: variantQuantitySums[cat.id] ?? 0,
         });
     }
     return result;
 };
-const resolveStockStatus = (availableCount, reorderThreshold) => {
-    if (availableCount === 0)
-        return 'OUT_OF_STOCK';
-    if (availableCount <= reorderThreshold)
-        return 'LOW_STOCK';
-    return 'IN_STOCK';
-};
 const formatCategory = (cat, stats) => {
     const isStock = (cat.type ?? 'STOCK') === 'STOCK';
-    const availableCount = stats.availableCount;
+    const variantCount = cat._count?.variants ?? 0;
+    // Quantity-tracked products have no unit rows; their stock is the column —
+    // UNLESS the product has variants, in which case each variant carries its
+    // OWN quantityOnHand (see assertVariantQuantityWithinCeiling in
+    // variants.controller.ts) and a sale deducts from the variant, never from
+    // this category's own column. The category's number then stops moving —
+    // the sum of the variants is the number that is actually still true.
+    const availableCount = isQuantityTracked(cat) && variantCount > 0
+        ? (stats.variantQuantitySum ?? 0)
+        : getAvailableStock(cat, stats.availableCount);
+    const valuedCount = isQuantityTracked(cat)
+        ? availableCount
+        : isStock
+            ? availableCount
+            : stats.totalItems;
     return {
         id: cat.id,
         name: cat.name,
         abbreviation: cat.abbreviation ?? cat.sku,
         type: cat.type ?? 'STOCK',
+        barcode: cat.barcode ?? null,
+        productCategoryId: cat.productCategoryId ?? null,
+        productCategory: cat.productCategory
+            ? { id: cat.productCategory.id, name: cat.productCategory.name }
+            : null,
         description: cat.description,
         supplier: cat.supplier,
         unit: cat.unit,
@@ -242,13 +362,129 @@ const formatCategory = (cat, stats) => {
         imageUrl: cat.imageUrl,
         images: Array.isArray(cat.images) ? cat.images : [],
         notes: cat.notes,
+        stockTrackingMode: cat.stockTrackingMode ?? 'SERIALIZED',
+        quantityOnHand: cat.quantityOnHand ?? 0,
+        /**
+         * How many variants this product has. The offline catalogue turns this
+         * into CachedProduct.hasVariants, which is what lets the till know a
+         * scanned product-level barcode is ambiguous without asking the server.
+         * Absent (0) on endpoints that do not include _count — a product with no
+         * variants and a product whose count was not loaded behave identically.
+         */
+        variantCount,
+        hasUniquePerUnitBarcode: cat.hasUniquePerUnitBarcode ?? null,
+        retailEnabled: cat.retailEnabled ?? true,
+        wholesaleEnabled: cat.wholesaleEnabled ?? true,
         ...stats,
+        // Overrides the unit-count figure from stats for quantity-tracked products.
+        availableCount,
         // stockStatus is only meaningful for STOCK categories
         stockStatus: isStock ? resolveStockStatus(availableCount, cat.reorderThreshold) : null,
-        // totalValue: for STOCK = costPrice × available; for INVENTORY = costPrice × all owned items
-        totalValue: Number(cat.costPrice ?? 0) * (isStock ? availableCount : stats.totalItems),
+        // totalValue: costPrice × on-hand (STOCK / quantity) or × all owned items (INVENTORY)
+        totalValue: Number(cat.costPrice ?? 0) * valuedCount,
         createdAt: cat.createdAt,
         updatedAt: cat.updatedAt,
+    };
+};
+const EMPTY_SUMMARY = {
+    total: 0,
+    inStock: 0,
+    lowStock: 0,
+    outOfStock: 0,
+    available: 0,
+    inUse: 0,
+    maintenance: 0,
+    faulty: 0,
+    totalValue: 0,
+};
+/**
+ * Walks every product matching the current filter and works out its on-hand
+ * quantity and stock status. Feeds both the stat cards (which must describe the
+ * whole catalogue, not the page on screen) and the low-stock quick filter, which
+ * cannot be a plain WHERE clause because stock status is derived.
+ *
+ * Reads five columns plus grouped unit counts, so it stays cheap as stock grows.
+ */
+const computeCategoryStatuses = async (tenantId, where) => {
+    const categories = await prisma.inventoryCategory.findMany({
+        where,
+        select: {
+            id: true,
+            type: true,
+            costPrice: true,
+            reorderThreshold: true,
+            stockTrackingMode: true,
+            quantityOnHand: true,
+            _count: { select: { variants: true } },
+        },
+    });
+    if (categories.length === 0) {
+        return { rows: [], summary: EMPTY_SUMMARY };
+    }
+    const ids = categories.map((c) => c.id);
+    const countBy = async (field, statuses) => {
+        const rows = await prisma.productItem.groupBy({
+            by: ['categoryId'],
+            where: { tenantId, categoryId: { in: ids }, [field]: { in: statuses } },
+            _count: { id: true },
+        });
+        const map = {};
+        for (const row of rows)
+            map[row.categoryId] = row._count.id;
+        return map;
+    };
+    const [stockAvailable, invAvailable, stockDeployed, invInUse, maintenance, faulty, variantQuantitySums] = await Promise.all([
+        countBy('stockStatus', ['AVAILABLE']),
+        countBy('inventoryStatus', ['AVAILABLE']),
+        countBy('stockStatus', ['DEPLOYED']),
+        countBy('inventoryStatus', ['IN_USE']),
+        countBy('stockStatus', ['UNDER_MAINTENANCE']),
+        countBy('stockStatus', ['FAULTY', 'COMPLETELY_BAD']),
+        getVariantQuantitySums(tenantId, ids),
+    ]);
+    let inStock = 0;
+    let lowStock = 0;
+    let outOfStock = 0;
+    let available = 0;
+    let inUse = 0;
+    let totalValue = 0;
+    const rows = [];
+    for (const cat of categories) {
+        const isStock = (cat.type ?? 'STOCK') === 'STOCK';
+        const units = isStock ? (stockAvailable[cat.id] ?? 0) : (invAvailable[cat.id] ?? 0);
+        // Same rule as formatCategory: once a QUANTITY product has variants, each
+        // variant's own counter is what a sale actually moves, so their sum is
+        // what "on hand" means now — never the category's own frozen column.
+        const hasVariants = (cat._count?.variants ?? 0) > 0;
+        const onHand = isQuantityTracked(cat) && hasVariants
+            ? (variantQuantitySums[cat.id] ?? 0)
+            : getAvailableStock(cat, units);
+        available += onHand;
+        inUse += isStock ? (stockDeployed[cat.id] ?? 0) : (invInUse[cat.id] ?? 0);
+        totalValue += Number(cat.costPrice ?? 0) * onHand;
+        const status = isStock ? resolveStockStatus(onHand, cat.reorderThreshold ?? 0) : null;
+        rows.push({ id: cat.id, status });
+        if (status === 'IN_STOCK')
+            inStock += 1;
+        else if (status === 'LOW_STOCK')
+            lowStock += 1;
+        else if (status === 'OUT_OF_STOCK')
+            outOfStock += 1;
+    }
+    const sum = (map) => Object.values(map).reduce((total, n) => total + n, 0);
+    return {
+        rows,
+        summary: {
+            total: categories.length,
+            inStock,
+            lowStock,
+            outOfStock,
+            available,
+            inUse,
+            maintenance: sum(maintenance),
+            faulty: sum(faulty),
+            totalValue,
+        },
     };
 };
 // ── Category handlers ──────────────────────────────────────────────────────────
@@ -264,22 +500,69 @@ export const listCategories = async (req, res) => {
                 { name: { contains: search, mode: 'insensitive' } },
                 { abbreviation: { contains: search, mode: 'insensitive' } },
                 { sku: { contains: search, mode: 'insensitive' } },
+                { barcode: { contains: search, mode: 'insensitive' } },
             ];
         }
         if (typeFilter === 'STOCK' || typeFilter === 'INVENTORY') {
             where.type = typeFilter;
         }
+        // A till should only offer what its channel sells. Absent, every product is
+        // returned — the inventory screens want the whole catalogue.
+        const channel = String(req.query.channel ?? '').toUpperCase();
+        if (channel === 'RETAIL')
+            where.retailEnabled = true;
+        else if (channel === 'WHOLESALE')
+            where.wholesaleEnabled = true;
+        // Pagination is opt-in: callers that just want the whole list (the POS picker,
+        // the product dropdowns) keep getting a plain array by not sending `page`.
+        const pageParam = req.query.page ? parseInt(req.query.page, 10) : null;
+        const paginated = pageParam !== null && Number.isFinite(pageParam);
+        const page = paginated ? Math.max(1, pageParam) : 1;
+        const pageSize = limit && limit > 0 ? limit : 20;
+        // Stock status is derived from unit counts, so the low-stock quick filter is
+        // resolved to a set of ids first. The summary is built from the unfiltered
+        // set so the stat cards keep showing catalogue totals while it is applied.
+        const stockStatusFilter = req.query.stockStatus ? String(req.query.stockStatus) : undefined;
+        let summary = EMPTY_SUMMARY;
+        if (paginated) {
+            const computed = await computeCategoryStatuses(tenantId, where);
+            summary = computed.summary;
+            if (stockStatusFilter) {
+                where.id = {
+                    in: computed.rows.filter((r) => r.status === stockStatusFilter).map((r) => r.id),
+                };
+            }
+        }
+        const total = paginated ? await prisma.inventoryCategory.count({ where }) : 0;
         const categories = await prisma.inventoryCategory.findMany({
             where,
             orderBy: { name: 'asc' },
-            ...(limit ? { take: limit } : {}),
+            // _count.variants lets the offline catalogue set hasVariants per product
+            // without one extra round trip per product at sync time.
+            include: { productCategory: true, _count: { select: { variants: true } } },
+            ...(paginated
+                ? { skip: (page - 1) * pageSize, take: pageSize }
+                : limit
+                    ? { take: limit }
+                    : {}),
         });
         const statsMap = await buildBatchCategoryStats(tenantId, categories.map((c) => ({ id: c.id, type: c.type ?? 'STOCK' })));
         const data = categories.map((cat) => formatCategory(cat, statsMap.get(cat.id)));
+        if (!paginated) {
+            return res.status(200).json({
+                success: true,
+                message: 'Inventory categories retrieved successfully',
+                data,
+            });
+        }
         return res.status(200).json({
             success: true,
             message: 'Inventory categories retrieved successfully',
             data,
+            pagination: { page, limit: pageSize, total, pages: Math.ceil(total / pageSize) },
+            // Totals cover every matching product, not just this page — the stat cards
+            // above the table would otherwise only describe page 1.
+            summary,
         });
     }
     catch (error) {
@@ -298,7 +581,8 @@ export const getCategoryById = async (req, res) => {
         if (!category) {
             return res.status(404).json({ success: false, message: 'Category not found' });
         }
-        const [stats, invoices, documents] = await Promise.all([
+        const quantityTracked = isQuantityTracked(category);
+        const [baseStats, invoices, documents, variantAgg, soldAgg] = await Promise.all([
             buildCategoryStats(tenantId, category.id, category.type ?? 'STOCK'),
             prisma.invoice.findMany({
                 where: { tenantId, categoryId: category.id },
@@ -310,7 +594,37 @@ export const getCategoryById = async (req, res) => {
                 where: { tenantId, sourceModule: 'INVENTORY', sourceId: category.id },
                 orderBy: { createdAt: 'desc' },
             }),
+            // Sum of every variant's own quantityOnHand — see formatCategory for why
+            // this, not category.quantityOnHand, is the live "available" number once
+            // the product has variants.
+            quantityTracked
+                ? prisma.productVariant.aggregate({
+                    where: { tenantId, categoryId: category.id },
+                    _sum: { quantityOnHand: true },
+                })
+                : null,
+            // "Deployed" for a QUANTITY product has no per-unit ProductItem rows to
+            // count, so it is derived the same way as everywhere else stock moves
+            // for this kind of product: from the ledger. SALE_DEDUCTION rows are
+            // negative, RETURN_RESTORATION rows are positive, so -sum(delta) is
+            // "out with a customer and not yet returned" — the quantity-tracked
+            // analogue of a SERIALIZED unit sitting at stockStatus DEPLOYED.
+            quantityTracked
+                ? prisma.categoryStockLog.aggregate({
+                    where: {
+                        tenantId,
+                        categoryId: category.id,
+                        eventType: { in: ['SALE_DEDUCTION', 'RETURN_RESTORATION'] },
+                    },
+                    _sum: { delta: true },
+                })
+                : null,
         ]);
+        const stats = {
+            ...baseStats,
+            ...(variantAgg ? { variantQuantitySum: variantAgg._sum.quantityOnHand ?? 0 } : {}),
+            ...(soldAgg ? { soldCount: Math.max(0, -(soldAgg._sum.delta ?? 0)) } : {}),
+        };
         // Stock history: category-level stock events (new unit, deployed, maintenance, etc.)
         const stockLogs = await prisma.categoryStockLog.findMany({
             where: { tenantId, categoryId: category.id },
@@ -328,11 +642,35 @@ export const getCategoryById = async (req, res) => {
             notes: log.notes,
             date: log.createdAt,
         }));
+        // Current approved purchase invoice is the authoritative quota source
+        const approvedInvoice = (category.approvedInvoiceId
+            ? invoices.find((i) => i.id === category.approvedInvoiceId &&
+                i.type === 'PURCHASE' &&
+                i.status === 'APPROVED')
+            : null) ??
+            invoices.find((i) => i.type === 'PURCHASE' && i.status === 'APPROVED') ??
+            null;
+        // With approval switched off no invoice is ever raised, so the quota has to
+        // come from somewhere else or the till can never tell that every authorised
+        // unit has been added — the "Add unit" button would stay live forever.
+        // plannedQty is that source: it is the quantity the purchase authorised, set
+        // at creation and again on each restock.
+        const authorisedQty = approvedInvoice?.authorisedQty != null
+            ? Number(approvedInvoice.authorisedQty)
+            : (category.plannedQty ?? null);
+        const addedQty = approvedInvoice != null
+            ? Number(approvedInvoice.addedQty ?? 0)
+            : Number(stats.totalItems ?? 0);
+        const remainingQty = authorisedQty != null && addedQty != null ? Math.max(0, authorisedQty - addedQty) : null;
         return res.status(200).json({
             success: true,
             message: 'Category retrieved successfully',
             data: {
                 ...formatCategory(category, stats),
+                approvedInvoiceId: category.approvedInvoiceId ?? approvedInvoice?.id ?? null,
+                authorisedQty,
+                addedQty,
+                remainingQty,
                 stockMovements,
                 invoices,
                 documents,
@@ -365,6 +703,13 @@ export const createCategory = async (req, res) => {
         }
         const abbrev = data.abbreviation.toUpperCase();
         const identifierLabel = resolveIdentifierLabel(data.identifierType, data.identifierLabel);
+        const trackingMode = data.stockTrackingMode;
+        // Derived rather than trusted: a single-channel org never sees the choice.
+        const channels = resolveChannelFlags(req, data);
+        if (!channelsAreValid(channels)) {
+            return res.status(400).json({ success: false, message: CHANNELS_REQUIRED_MESSAGE });
+        }
+        const quantityTracked = trackingMode === 'QUANTITY';
         const category = await prisma.inventoryCategory.create({
             data: {
                 tenantId,
@@ -372,6 +717,12 @@ export const createCategory = async (req, res) => {
                 sku: abbrev,
                 abbreviation: abbrev,
                 type: (data.type ?? 'STOCK'),
+                stockTrackingMode: trackingMode,
+                retailEnabled: channels.retailEnabled,
+                wholesaleEnabled: channels.wholesaleEnabled,
+                barcode: data.barcode || null,
+                productCategoryId: data.productCategoryId || null,
+                unit: data.unit || null,
                 description: data.description ?? null,
                 supplier: data.supplier ?? null,
                 costPrice: (data.costPrice ?? 0),
@@ -387,10 +738,35 @@ export const createCategory = async (req, res) => {
                 invoiceApproved: false,
             },
         });
-        // Create a PURCHASE invoice so finance can approve it before units are added
+        // Quantity-tracked products have no units to authorise, so no purchase invoice
+        // is raised. The opening stock is applied here instead, and its cost is booked
+        // straight away unless the user said they already owned it.
         let invoice = null;
         const submittedBy = req.user?.id;
-        if (submittedBy) {
+        if (quantityTracked) {
+            const openingQty = data.quantityOnHand ?? data.plannedQty ?? 0;
+            if (openingQty > 0) {
+                await prisma.$transaction(async (tx) => {
+                    await addQuantityStock({
+                        tx,
+                        tenantId,
+                        categoryId: category.id,
+                        quantityAdded: openingQty,
+                        costPrice: Number(data.costPrice ?? 0),
+                        isNewPurchase: data.isNewPurchase ?? true,
+                        categoryName: category.name,
+                    });
+                });
+                // `category` was read before the stock was applied, so it still says 0.
+                // Returning that made a product with opening stock look empty until the
+                // next refetch.
+                category.quantityOnHand = openingQty;
+            }
+        }
+        else if (submittedBy && (await stockApprovalRequired(tenantId))) {
+            // Serialised, and this tenant puts stock purchases in front of finance.
+            // With the toggle off there is nothing to approve, so raising an invoice
+            // would only leave PENDING paperwork nobody ever actions.
             try {
                 invoice = await createPurchaseInvoice({ tenantId, categoryId: category.id, submittedBy });
             }
@@ -432,11 +808,33 @@ export const createCategory = async (req, res) => {
     catch (error) {
         console.error('Error creating inventory category:', error);
         const msg = error instanceof Error ? error.message : '';
-        if (msg.includes('inventory_categories_tenant_id_sku_key') ||
-            (msg.includes('unique') && msg.toLowerCase().includes('sku'))) {
+        // Matched on the error code, not the message. The previous text match looked
+        // for a lowercase 'unique' and the index name, but Prisma writes "Unique
+        // constraint failed on the fields: (`tenant_id`, `sku`)" — so every duplicate
+        // abbreviation fell through to a 500 instead of the 409 meant for it.
+        if (isUniqueViolationOn(error, 'sku')) {
             return res.status(409).json({
                 success: false,
                 message: 'A category with this abbreviation already exists. Please use a different abbreviation.',
+            });
+        }
+        // A barcode identifies a product, so a collision means this product already
+        // exists and the user wants to add stock to it, not create a second one.
+        // Naming the owner is the whole answer — without it this surfaced as a bare
+        // 500 and looked like the page was broken.
+        if (isUniqueViolationOn(error, 'barcode')) {
+            const owner = await prisma.inventoryCategory
+                .findFirst({
+                where: { tenantId: req.tenantId, barcode: req.body?.barcode },
+                select: { id: true, name: true, abbreviation: true },
+            })
+                .catch(() => null);
+            return res.status(409).json({
+                success: false,
+                message: owner
+                    ? `Barcode ${req.body?.barcode} already belongs to "${owner.name}" (${owner.abbreviation}). To add more of it, use "Add stock to an existing product" instead.`
+                    : 'This barcode is already used by another product. Use a different barcode, or add stock to the existing product instead.',
+                data: owner ? { existingCategoryId: owner.id, existingCategoryName: owner.name } : undefined,
             });
         }
         return res.status(500).json({
@@ -464,6 +862,19 @@ export const updateCategory = async (req, res) => {
         const oldImages = Array.isArray(existing.images) ? existing.images : [];
         const data = parsed.data;
         const nextAbbrev = data.abbreviation ? data.abbreviation.toUpperCase() : undefined;
+        // Channels: only validated when the caller actually sends one, so an update
+        // that touches only the name cannot fail on a field it never mentioned.
+        let nextChannels = {};
+        if (data.retailEnabled !== undefined || data.wholesaleEnabled !== undefined) {
+            const merged = {
+                retailEnabled: data.retailEnabled ?? existing.retailEnabled ?? true,
+                wholesaleEnabled: data.wholesaleEnabled ?? existing.wholesaleEnabled ?? true,
+            };
+            if (!channelsAreValid(merged)) {
+                return res.status(400).json({ success: false, message: CHANNELS_REQUIRED_MESSAGE });
+            }
+            nextChannels = merged;
+        }
         let identifierLabel = undefined;
         if (data.identifierType !== undefined || data.identifierLabel !== undefined) {
             const resolvedType = data.identifierType ?? existing.identifierType;
@@ -475,6 +886,12 @@ export const updateCategory = async (req, res) => {
                 name: data.name ?? undefined,
                 sku: nextAbbrev,
                 abbreviation: nextAbbrev,
+                barcode: data.barcode !== undefined ? (data.barcode || null) : undefined,
+                hasUniquePerUnitBarcode: data.hasUniquePerUnitBarcode !== undefined ? data.hasUniquePerUnitBarcode : undefined,
+                retailEnabled: nextChannels.retailEnabled,
+                wholesaleEnabled: nextChannels.wholesaleEnabled,
+                productCategoryId: data.productCategoryId !== undefined ? (data.productCategoryId || null) : undefined,
+                unit: data.unit !== undefined ? (data.unit || null) : undefined,
                 description: data.description !== undefined ? data.description : undefined,
                 supplier: data.supplier !== undefined ? data.supplier : undefined,
                 costPrice: data.costPrice !== undefined ? data.costPrice : undefined,
@@ -596,7 +1013,7 @@ export const checkCategoryAvailability = async (req, res) => {
         if (!category) {
             return res.status(404).json({ success: false, message: 'Category not found' });
         }
-        const [available, items] = await Promise.all([
+        const [availableUnits, items] = await Promise.all([
             prisma.productItem.count({
                 where: { tenantId, categoryId: req.params.id, [statusField(category.type ?? 'STOCK')]: 'AVAILABLE' },
             }),
@@ -606,6 +1023,9 @@ export const checkCategoryAvailability = async (req, res) => {
                 take: requested,
             }),
         ]);
+        // Quantity-tracked products can fulfil from the count alone; there are no
+        // individual units to hand back.
+        const available = getAvailableStock(category, availableUnits);
         return res.json({
             success: true,
             message: 'Availability checked successfully',
@@ -639,7 +1059,7 @@ export const createProductItem = async (req, res) => {
                 message: parsed.error.issues[0]?.message || 'Invalid payload',
             });
         }
-        const { categoryId, name, identifierMode, userIdentifier, notes, status } = parsed.data;
+        const { categoryId, name, identifierMode, userIdentifier, notes, status, variantId } = parsed.data;
         if (identifierMode === 'manual' && !userIdentifier?.trim()) {
             return res.status(422).json({
                 success: false,
@@ -652,8 +1072,11 @@ export const createProductItem = async (req, res) => {
         if (!category) {
             return res.status(404).json({ success: false, message: 'Category not found' });
         }
+        // Tenants that do not run stock purchases through finance skip both guards
+        // below. Absent setting resolves to true, so existing tenants are unaffected.
+        const requiresApproval = await stockApprovalRequired(tenantId);
         // Guard: invoice must be approved before any units can be added
-        if (!category.invoiceApproved) {
+        if (requiresApproval && !category.invoiceApproved) {
             const pendingInvoice = await prisma.invoice.findFirst({
                 where: { categoryId, tenantId, type: 'PURCHASE', status: { in: ['PENDING', 'REJECTED'] } },
                 orderBy: { createdAt: 'desc' },
@@ -669,11 +1092,20 @@ export const createProductItem = async (req, res) => {
             });
         }
         // Guard: authorised quantity check
-        const approvedInvoice = await prisma.invoice.findFirst({
-            where: { categoryId, tenantId, type: 'PURCHASE', status: 'APPROVED' },
-            orderBy: { createdAt: 'desc' },
-        });
-        if (approvedInvoice) {
+        const linkedApproved = category.approvedInvoiceId
+            ? await prisma.invoice.findUnique({
+                where: { id: category.approvedInvoiceId },
+            })
+            : null;
+        const approvedInvoice = linkedApproved &&
+            linkedApproved.type === 'PURCHASE' &&
+            linkedApproved.status === 'APPROVED'
+            ? linkedApproved
+            : await prisma.invoice.findFirst({
+                where: { categoryId, tenantId, type: 'PURCHASE', status: 'APPROVED' },
+                orderBy: { createdAt: 'desc' },
+            });
+        if (requiresApproval && approvedInvoice) {
             const authorisedQty = approvedInvoice.authorisedQty ?? 0;
             const addedQty = approvedInvoice.addedQty ?? 0;
             if (addedQty >= authorisedQty) {
@@ -684,6 +1116,26 @@ export const createProductItem = async (req, res) => {
                         message: `Cannot add more units than authorised. Authorised: ${authorisedQty}, Already added: ${addedQty}, Remaining: 0.`,
                     },
                 });
+            }
+        }
+        else if (!requiresApproval) {
+            // Same ceiling without the paperwork: you may hold as many units as the
+            // purchase authorised, and restocking is what raises it. Enforced here as
+            // well as in the UI so a stale page cannot walk past it.
+            const authorised = Number(category.plannedQty ?? 0);
+            if (authorised > 0) {
+                const existing = await prisma.productItem.count({
+                    where: { tenantId, categoryId },
+                });
+                if (existing >= authorised) {
+                    return res.status(403).json({
+                        success: false,
+                        error: {
+                            code: 'AUTHORISED_QTY_EXCEEDED',
+                            message: `All ${authorised} authorised unit(s) have been added. Restock to add more.`,
+                        },
+                    });
+                }
             }
         }
         const catType = category.type ?? 'STOCK';
@@ -704,11 +1156,37 @@ export const createProductItem = async (req, res) => {
         const statusData = catType === 'INVENTORY'
             ? { inventoryStatus: (status ?? 'AVAILABLE'), stockStatus: null }
             : { stockStatus: (status ?? 'AVAILABLE'), inventoryStatus: null };
+        // Which variant this physical unit belongs to. Validated against this
+        // tenant and this category rather than trusted: a variantId from another
+        // product would put the unit in stock under an option that product does
+        // not sell, and it could never be found again by the variant-scoped
+        // stock queries.
+        let resolvedVariantId = null;
+        if (variantId) {
+            const variant = await prisma.productVariant.findFirst({
+                where: { id: variantId, tenantId, categoryId },
+                select: { id: true, isActive: true },
+            });
+            if (!variant) {
+                return res.status(422).json({
+                    success: false,
+                    message: 'That variant does not belong to this product.',
+                });
+            }
+            if (!variant.isActive) {
+                return res.status(422).json({
+                    success: false,
+                    message: 'That variant is deactivated. Reactivate it before adding stock to it.',
+                });
+            }
+            resolvedVariantId = variant.id;
+        }
         const item = await prisma.productItem.create({
             data: {
                 tenantId,
                 categoryId,
                 systemId,
+                variantId: resolvedVariantId,
                 name: name?.trim() ?? null,
                 userIdentifier: resolvedUserIdentifier,
                 notes: notes?.trim() ?? null,
@@ -791,6 +1269,12 @@ export const createProductItem = async (req, res) => {
 export const createProductItems = createProductItem;
 // ── restockRequest ─────────────────────────────────────────────────────────────
 const RestockRequestSchema = z.object({
+    /** False when recording stock already owned — the count moves, no expense is booked. */
+    isNewPurchase: z.boolean().optional(),
+    /** Device-generated id for a restock recorded offline; makes the retry safe. */
+    offlineId: z.string().optional(),
+    /** Which option the stock is for. Absent = the product has no variants. */
+    variantId: z.string().optional(),
     quantity: z.coerce.number().int().positive(),
     costPrice: z.coerce.number().nonnegative().optional(),
     plannedDate: z.string().optional(),
@@ -815,28 +1299,119 @@ export const restockRequest = async (req, res) => {
         }
         const { quantity, costPrice, plannedDate, notes } = parsed.data;
         const effectiveCostPrice = costPrice ?? Number(category.costPrice ?? 0);
-        // Update category's plannedQty and optionally costPrice for this restock
+        // Not blocked — a clearance/loss-leader restock can be intentional (same
+        // pattern as the below-cost warning on product creation) — but a per-unit
+        // cost at or above what it's sold for is usually a decimal slip on a bulk
+        // invoice, so the till gets a warning to double check before it goes unnoticed.
+        const sellingPrice = Number(category.sellingPrice ?? 0);
+        const priceWarning = sellingPrice > 0 && effectiveCostPrice >= sellingPrice
+            ? `Cost price (${effectiveCostPrice}) is at or above the current selling price (${sellingPrice}) for ${category.name}. Double-check this isn't a data-entry mistake.`
+            : undefined;
+        // Quantity-tracked stock arrives immediately: the count goes up by the amount
+        // restocked (an addition, not a replacement) and the purchase is booked. No
+        // invoice and no approval flag are involved.
+        if (isQuantityTracked(category)) {
+            const invoiceless = await prisma.$transaction(async (tx) => {
+                if (costPrice !== undefined) {
+                    await tx.inventoryCategory.update({
+                        where: { id: category.id },
+                        data: { costPrice: costPrice },
+                    });
+                }
+                await addQuantityStock({
+                    tx,
+                    tenantId,
+                    categoryId: category.id,
+                    quantityAdded: quantity,
+                    costPrice: effectiveCostPrice,
+                    isNewPurchase: parsed.data.isNewPurchase ?? true,
+                    categoryName: category.name,
+                    note: notes,
+                    offlineId: parsed.data.offlineId,
+                    // Without this an offline receipt against an option credited the
+                    // parent product instead, and the device's own count for that option
+                    // silently disagreed with the server from then on.
+                    variantId: parsed.data.variantId ?? null,
+                });
+                return tx.inventoryCategory.findUnique({ where: { id: category.id } });
+            });
+            void logAudit({
+                tenantId,
+                actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+                actorId: req.user?.id,
+                action: 'RESTOCK_RECORDED',
+                module: 'inventory',
+                entityType: 'InventoryCategory',
+                entityId: category.id,
+                entityLabel: category.name,
+                details: {
+                    quantity,
+                    costPrice: effectiveCostPrice,
+                    // Which option was credited — a log saying only "the product" cannot
+                    // answer where the stock actually went.
+                    variantId: parsed.data.variantId ?? null,
+                },
+                ...extractRequestContext(req),
+            });
+            return res.status(200).json({
+                success: true,
+                message: `${quantity} unit(s) added to ${category.name}`,
+                data: { category: invoiceless, invoice: null, priceWarning },
+            });
+        }
+        // Serialised: raise the authorised quantity, and involve finance only if the
+        // tenant asks for it.
+        const needsApproval = await stockApprovalRequired(tenantId);
+        // With an invoice, the quota lives on the invoice and starts its own count
+        // from zero, so plannedQty is simply the newly authorised amount. Without
+        // one, the quota is plannedQty measured against every unit that exists — so
+        // it has to be raised above the current count, not reset to the restock
+        // amount, or restocking would leave remaining negative and the button dead.
+        const existingUnits = needsApproval
+            ? 0
+            : await prisma.productItem.count({ where: { tenantId, categoryId: category.id } });
+        const newPlannedQty = needsApproval ? quantity : existingUnits + quantity;
         await prisma.inventoryCategory.update({
             where: { id: category.id },
             data: {
-                plannedQty: quantity,
+                plannedQty: newPlannedQty,
                 plannedDate: plannedDate ? new Date(plannedDate) : undefined,
                 costPrice: costPrice !== undefined ? costPrice : undefined,
-                invoiceApproved: false, // must re-approve for new batch
+                // Only reset the flag where it gates anything; otherwise it would sit
+                // false forever and mean nothing.
+                invoiceApproved: needsApproval ? false : undefined,
             },
         });
         const { createPurchaseInvoice: createInvoice } = await import('../services/invoiceService.js');
-        const invoice = await createInvoice({ tenantId, categoryId: category.id, submittedBy });
-        if (notes) {
+        const invoice = needsApproval
+            ? await createInvoice({ tenantId, categoryId: category.id, submittedBy })
+            : null;
+        if (notes && invoice) {
             await prisma.invoice.update({
                 where: { id: invoice.id },
                 data: { notes },
             });
         }
+        void logAudit({
+            tenantId,
+            actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+            actorId: req.user?.id,
+            action: 'RESTOCK_REQUESTED',
+            module: 'inventory',
+            entityType: 'InventoryCategory',
+            entityId: category.id,
+            entityLabel: category.name,
+            details: { quantity, effectiveCostPrice },
+            ...extractRequestContext(req),
+        });
         return res.status(201).json({
             success: true,
-            message: 'Restock request submitted successfully. Awaiting finance approval.',
-            data: { invoice, effectiveCostPrice, quantity },
+            // Saying "awaiting finance approval" when nobody is waiting on finance
+            // just tells the user their stock is stuck when it is not.
+            message: needsApproval
+                ? 'Restock request submitted successfully. Awaiting finance approval.'
+                : `${quantity} more unit(s) authorised for ${category.name}. You can add them now.`,
+            data: { invoice, effectiveCostPrice, quantity, requiresApproval: needsApproval, priceWarning },
         });
     }
     catch (error) {
@@ -855,28 +1430,67 @@ export const listProductItems = async (req, res) => {
         const status = req.query.status ? String(req.query.status) : undefined;
         const search = req.query.search ? String(req.query.search) : undefined;
         const page = req.query.page ? parseInt(req.query.page, 10) : 1;
-        const limit = req.query.limit ? parseInt(req.query.limit, 10) : 20;
+        // Capped rather than trusted: without categoryId this can span the whole
+        // tenant, and the offline catalog legitimately asks for thousands at once.
+        const MAX_LIMIT = 5000;
+        const requested = req.query.limit ? parseInt(req.query.limit, 10) : 20;
+        const limit = Math.min(Math.max(Number.isFinite(requested) ? requested : 20, 1), MAX_LIMIT);
         const skip = (page - 1) * limit;
-        if (!categoryId) {
-            return res.status(400).json({ success: false, message: 'categoryId query param is required' });
-        }
-        const where = { tenantId, categoryId };
+        // categoryId is optional. Requiring it meant the offline catalog sync, which
+        // wants every available unit in the tenant, got a 400 on every attempt — and
+        // because it swallows failures, the unit cache was silently always empty.
+        const where = { tenantId };
+        if (categoryId)
+            where.categoryId = categoryId;
+        // Backfilling variants onto stock that predates them means finding the
+        // units that still have none — "none" filters to exactly those.
+        const variantFilter = req.query.variantId ? String(req.query.variantId) : undefined;
+        if (variantFilter === 'none')
+            where.variantId = null;
+        else if (variantFilter)
+            where.variantId = variantFilter;
+        // Each clause goes in its own AND entry. Assigning both to `where.OR` meant a
+        // search silently discarded the status filter.
+        const and = [];
         if (status) {
-            // Status may be in either column depending on category type — search both
-            where.OR = [
-                { stockStatus: status },
-                { inventoryStatus: status },
-            ];
+            // Status lives in whichever column suits the category type, so both are
+            // searched — but only for the enums that actually declare the value.
+            // Postgres rejects an unknown enum member outright, so asking
+            // inventoryStatus for a stock-only value threw and surfaced as a 500.
+            const statusOr = [];
+            if (STOCK_ITEM_STATUSES.has(status))
+                statusOr.push({ stockStatus: status });
+            if (INVENTORY_ITEM_STATUSES.has(status))
+                statusOr.push({ inventoryStatus: status });
+            if (!statusOr.length) {
+                return res.status(400).json({ success: false, message: `Unknown status "${status}"` });
+            }
+            and.push({ OR: statusOr });
         }
         if (search) {
-            where.OR = [
-                { systemId: { contains: search, mode: 'insensitive' } },
-                { userIdentifier: { contains: search, mode: 'insensitive' } },
-                { name: { contains: search, mode: 'insensitive' } },
-            ];
+            and.push({
+                OR: [
+                    { systemId: { contains: search, mode: 'insensitive' } },
+                    { userIdentifier: { contains: search, mode: 'insensitive' } },
+                    { name: { contains: search, mode: 'insensitive' } },
+                    // So "blue" finds every Blue unit, not just one whose serial
+                    // happens to contain those letters.
+                    { variant: { label: { contains: search, mode: 'insensitive' } } },
+                ],
+            });
         }
+        if (and.length)
+            where.AND = and;
         const [items, total] = await Promise.all([
-            prisma.productItem.findMany({ where, orderBy: { createdAt: 'desc' }, skip, take: limit }),
+            prisma.productItem.findMany({
+                where,
+                orderBy: { createdAt: 'desc' },
+                skip,
+                take: limit,
+                // Every row can then say which option it is, rather than the units
+                // list looking like a wall of identical serials.
+                include: { variant: { select: { id: true, label: true } } },
+            }),
             prisma.productItem.count({ where }),
         ]);
         return res.json({
@@ -955,7 +1569,35 @@ export const updateProductItem = async (req, res) => {
         }
         const catType = existing.category?.type ?? 'STOCK';
         const validStatusSet = catType === 'INVENTORY' ? INVENTORY_STATUSES : STOCK_STATUSES;
-        const { name, userIdentifier, notes, imageUrl, status } = parsed.data;
+        const { name, userIdentifier, notes, imageUrl, status, variantId } = parsed.data;
+        // Same check as the create path: a variant from another product would put
+        // this unit under an option the product does not sell, where no
+        // variant-scoped stock read would ever find it again.
+        let resolvedVariantId;
+        if (variantId !== undefined) {
+            if (!variantId) {
+                resolvedVariantId = null;
+            }
+            else {
+                const variant = await prisma.productVariant.findFirst({
+                    where: { id: variantId, tenantId, categoryId: existing.categoryId },
+                    select: { id: true, isActive: true },
+                });
+                if (!variant) {
+                    return res.status(422).json({
+                        success: false,
+                        message: 'That variant does not belong to this product.',
+                    });
+                }
+                if (!variant.isActive) {
+                    return res.status(422).json({
+                        success: false,
+                        message: 'That variant is deactivated. Reactivate it before assigning stock to it.',
+                    });
+                }
+                resolvedVariantId = variant.id;
+            }
+        }
         if (status && !validStatusSet.has(status)) {
             return res.status(422).json({
                 success: false,
@@ -982,6 +1624,7 @@ export const updateProductItem = async (req, res) => {
                 ...(name !== undefined && { name: name.trim() || null }),
                 ...(userIdentifier !== undefined && { userIdentifier }),
                 ...(notes !== undefined && { notes }),
+                ...(resolvedVariantId !== undefined && { variantId: resolvedVariantId }),
                 ...statusUpdate,
                 ...(imageUrl !== undefined && { imageUrl: imageUrl || null }),
             },
@@ -1073,6 +1716,18 @@ export const deleteProductItem = async (req, res) => {
             title: `Unit removed: ${item.systemId}`,
             notes: null,
             performedBy: req.user?.id ?? null,
+        });
+        void logAudit({
+            tenantId,
+            actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
+            actorId: req.user?.id,
+            action: 'PRODUCT_ITEM_DELETED',
+            module: 'inventory',
+            entityType: 'ProductItem',
+            entityId: req.params.id,
+            entityLabel: item.systemId,
+            details: { categoryId: item.categoryId, status: getItemStatus(item, catType) },
+            ...extractRequestContext(req),
         });
         return res.json({ success: true, message: 'Item deleted successfully' });
     }

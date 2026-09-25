@@ -9,6 +9,8 @@ export declare const MODULE_KEYS: {
     readonly SETTINGS: "settings";
     readonly ADMINISTRATION: "administration";
     readonly AUDIT: "audit";
+    readonly RETAIL_SALES: "retail_sales";
+    readonly WHOLESALE_SALES: "wholesale_sales";
 };
 /** Modules permanently enabled for owner accounts regardless of DB state */
 export declare const OWNER_PERMANENT_MODULES: readonly ["dashboard", "billing", "settings", "administration", "audit"];
@@ -59,6 +61,16 @@ export declare const MODULES_CONFIG: ({
     table: null;
 } | {
     key: "audit";
+    displayName: string;
+    description: string;
+    table: string;
+} | {
+    key: "retail_sales";
+    displayName: string;
+    description: string;
+    table: string;
+} | {
+    key: "wholesale_sales";
     displayName: string;
     description: string;
     table: string;

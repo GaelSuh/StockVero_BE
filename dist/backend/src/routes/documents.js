@@ -177,6 +177,15 @@ router.patch('/:id', async (req, res) => {
     });
     return res.json({ success: true, data: updated });
 });
+// GET /api/v1/documents/:id/can-delete
+router.get('/:id/can-delete', async (req, res) => {
+    const doc = await prisma.document.findUnique({ where: { id: req.params.id } });
+    if (!doc)
+        return res.status(404).json({ success: false, message: 'Document not found.' });
+    if (doc.tenantId !== req.tenantId)
+        return res.status(403).json({ success: false, message: 'Access denied.' });
+    return res.json({ success: true, data: { canDelete: true, dependencies: [] } });
+});
 // DELETE /api/v1/documents/:id
 router.delete('/:id', async (req, res) => {
     const tenantId = req.tenantId;

@@ -9,3 +9,4 @@ export declare const createClientInvoiceHandler: (req: AuthRequest, res: Respons
 export declare const sendClientInvoice: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
 export declare const approveProjectInstalment: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
 export declare const getInvoicePdfData: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const deleteInvoice: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;

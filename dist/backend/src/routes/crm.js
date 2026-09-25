@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { tenantGuard, moduleGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
-import { createCustomer, listCustomers, getCustomer, updateCustomer, deleteCustomer, getCustomerInvoices, listCustomerPurchases, addCustomerPurchase, deleteCustomerPurchase, } from '../controllers/crm.controller.js';
+import { checkCustomerDependencies } from '../services/dependencyCheckService.js';
+import { createCustomer, listCustomers, getCustomer, updateCustomer, deleteCustomer, getCustomerInvoices, getCustomerCreditSalesController, getCustomerPurchaseHistoryController, listCustomerPurchases, addCustomerPurchase, deleteCustomerPurchase, } from '../controllers/crm.controller.js';
 const router = Router();
 router.use(tenantGuard, mustChangePasswordGuard, moduleGuard('crm'));
 /**
@@ -141,8 +142,25 @@ router.patch('/customers/:id', permissionGuard('crm', 'canUpdate'), updateCustom
  *       204:
  *         description: Customer deleted
  */
-router.delete('/customers/:id', permissionGuard('crm', 'canDelete'), deleteCustomer);
+router.get('/customers/:id/can-delete', permissionGuard('crm', 'canDelete'), async (req, res) => {
+    try {
+        const report = await checkCustomerDependencies(req.params.id, req.tenantId);
+        return res.json({ success: true, data: report });
+    }
+    catch (error) {
+        return res.status(500).json({ success: false, message: 'Dependency check failed' });
+    }
+});
+router.delete('/customers/:id', permissionGuard('crm', 'canDelete'), async (req, res) => {
+    const report = await checkCustomerDependencies(req.params.id, req.tenantId);
+    if (!report.canDelete) {
+        return res.status(409).json({ success: false, message: 'Cannot delete: unresolved dependencies', data: report });
+    }
+    return deleteCustomer(req, res);
+});
 router.get('/customers/:id/invoices', permissionGuard('crm', 'canRead'), getCustomerInvoices);
+router.get('/customers/:id/credit-sales', permissionGuard('crm', 'canRead'), getCustomerCreditSalesController);
+router.get('/customers/:id/purchase-history', permissionGuard('crm', 'canRead'), getCustomerPurchaseHistoryController);
 // ── Customer Purchases ───────────────────────────────────────────────────────
 router.get('/customers/:id/purchases', permissionGuard('crm', 'canRead'), listCustomerPurchases);
 router.post('/customers/:id/purchases', permissionGuard('crm', 'canCreate'), addCustomerPurchase);

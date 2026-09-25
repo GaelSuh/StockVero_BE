@@ -15,7 +15,8 @@ export async function approveProjectInvoiceInstalment({ invoiceId, tenantId, app
         });
         if (!transaction)
             throw new Error('Transaction not found or not an accepted income transaction');
-        if (transaction.invoicePaymentId)
+        const linkedPayment = await tx.invoicePayment.findUnique({ where: { transactionId } });
+        if (linkedPayment)
             throw new Error('This transaction is already linked to a payment');
         const currentApproved = invoice.payments.reduce((sum, payment) => sum + Number(payment.amountApproved), 0);
         const total = Number(invoice.total);
@@ -35,11 +36,9 @@ export async function approveProjectInvoiceInstalment({ invoiceId, tenantId, app
                 notes: notes ?? null,
             },
         });
-        // Mark transaction as linked
-        await tx.transaction.update({
-            where: { id: transactionId },
-            data: { invoicePaymentId: payment.id },
-        });
+        // Link to the transaction is held by InvoicePayment.transactionId (unique) — no
+        // back-reference column exists on Transaction, so nothing to update there.
+        void payment;
         const newApproved = currentApproved + amountApproved;
         const newRemaining = Math.max(0, total - newApproved);
         const isFullyPaid = newRemaining < 0.01;

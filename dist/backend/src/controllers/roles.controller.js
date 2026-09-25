@@ -157,11 +157,11 @@ export const createRole = async (req, res) => {
             type: 'administration.role.created',
             title: 'New Role Created',
             message: `A new role "${role.name}" (${role.abbreviation}) has been added.`,
-            link: '/administration/roles',
+            link: '/admin/roles',
         });
         void logAudit({
             tenantId: req.tenantId,
-            actorType: AuditActorType.OWNER,
+            actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
             actorId: req.user?.id,
             action: 'ROLE_CREATED',
             module: 'administration',
@@ -265,11 +265,11 @@ export const updateRole = async (req, res) => {
             type: 'administration.role.updated',
             title: 'Role Updated',
             message: `The permissions for role "${role?.name}" have been updated.`,
-            link: '/administration/roles',
+            link: '/admin/roles',
         });
         void logAudit({
             tenantId: req.tenantId,
-            actorType: AuditActorType.OWNER,
+            actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
             actorId: req.user?.id,
             action: 'ROLE_UPDATED',
             module: 'administration',
@@ -318,11 +318,11 @@ export const deleteRole = async (req, res) => {
             type: 'administration.role.deleted',
             title: 'Role Deleted',
             message: `The role "${role.name}" has been removed.`,
-            link: '/administration/roles',
+            link: '/admin/roles',
         });
         void logAudit({
             tenantId: req.tenantId,
-            actorType: AuditActorType.OWNER,
+            actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
             actorId: req.user?.id,
             action: 'ROLE_DELETED',
             module: 'administration',
