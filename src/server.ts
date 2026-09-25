@@ -32,6 +32,7 @@ import returnsRoutes from './routes/returns.js';
 import priceListsRoutes from './routes/price-lists.js';
 import deliveryRoutes from './routes/delivery.js';
 import { startCronJobs } from './services/scheduler.js';
+import { syncModules } from './services/moduleSync.js';
 
 const app: Express = express();
 const port = process.env.PORT || 4000;
@@ -115,6 +116,7 @@ app.use(errorHandler);
 const server = app.listen(port, () => {
   console.log(`[server] running on http://localhost:${port}`);
   startCronJobs();
+  void syncModules();
 });
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
