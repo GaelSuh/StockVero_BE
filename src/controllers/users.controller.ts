@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { z } from 'zod';
 import bcrypt from 'bcrypt';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { AuthRequest, Permission } from '../types/index.js';
 import { generateToken } from '../lib/jwt.js';
@@ -315,10 +316,10 @@ export const updateMyPreferences = async (req: AuthRequest, res: Response) => {
         tenantId: req.tenantId!,
         userId: req.user!.id,
         userType,
-        themeConfig: themeConfig ?? null,
+        themeConfig: (themeConfig ?? Prisma.JsonNull) as Prisma.InputJsonValue | typeof Prisma.JsonNull,
       },
       update: {
-        themeConfig: themeConfig ?? null,
+        themeConfig: (themeConfig ?? Prisma.JsonNull) as Prisma.InputJsonValue | typeof Prisma.JsonNull,
       },
     });
 

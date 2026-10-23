@@ -32,62 +32,30 @@ export interface IndustryDefinition {
 }
 
 /**
- * Finance is in every default. A business that cannot see what it took today has
- * no reason to use any of this, and it is the module people most regret not
- * enabling. Inventory likewise: every type here holds stock of some kind.
+ * Matches the onboarding table in StockVero_Retail_Wholesale_POS_Feature_Spec.md §10:
+ * Inventory, Finance and Analytics are in every type (every business tracks stock,
+ * money and performance); what changes is the selling model.
+ *
+ * One deliberate addition to the spec: CRM rides along with Wholesale Sales. The
+ * wholesale till picks a known customer to apply their price list and credit,
+ * and those customer records are served by the CRM module.
  */
+const BASE = [MODULE_KEYS.INVENTORY, MODULE_KEYS.FINANCE, MODULE_KEYS.ANALYTICS];
+const WHOLESALE = [MODULE_KEYS.WHOLESALE_SALES, MODULE_KEYS.CRM];
+
 export const INDUSTRIES: IndustryDefinition[] = [
-  {
-    organizationType: 'RETAIL_SHOP',
-    label: 'Retail shop',
-    defaultModules: [MODULE_KEYS.INVENTORY, MODULE_KEYS.RETAIL_SALES, MODULE_KEYS.FINANCE],
-  },
-  {
-    organizationType: 'WHOLESALE_DISTRIBUTION',
-    label: 'Wholesale / distribution',
-    // CRM is a default here and not for a retail shop: wholesale sells to known
-    // customers on agreed rates, so customer records are load-bearing rather
-    // than optional.
-    defaultModules: [
-      MODULE_KEYS.INVENTORY,
-      MODULE_KEYS.WHOLESALE_SALES,
-      MODULE_KEYS.CRM,
-      MODULE_KEYS.FINANCE,
-    ],
-  },
+  { organizationType: 'RETAIL_SHOP', label: 'Retail shop', defaultModules: [...BASE, MODULE_KEYS.RETAIL_SALES] },
+  { organizationType: 'WHOLESALE_DISTRIBUTION', label: 'Wholesale / distribution', defaultModules: [...BASE, ...WHOLESALE] },
   {
     organizationType: 'RETAIL_WHOLESALE',
     label: 'Retail and wholesale',
-    defaultModules: [
-      MODULE_KEYS.INVENTORY,
-      MODULE_KEYS.RETAIL_SALES,
-      MODULE_KEYS.WHOLESALE_SALES,
-      MODULE_KEYS.CRM,
-      MODULE_KEYS.FINANCE,
-    ],
+    defaultModules: [...BASE, MODULE_KEYS.RETAIL_SALES, ...WHOLESALE],
   },
-  {
-    organizationType: 'SERVICE_INSTALLATION',
-    label: 'Installation / contracting',
-    defaultModules: [
-      MODULE_KEYS.INVENTORY,
-      MODULE_KEYS.PROJECTS,
-      MODULE_KEYS.CRM,
-      MODULE_KEYS.FINANCE,
-    ],
-  },
-  {
-    organizationType: 'MANUFACTURING',
-    label: 'Manufacturing / production',
-    defaultModules: [MODULE_KEYS.INVENTORY, MODULE_KEYS.PROJECTS, MODULE_KEYS.FINANCE],
-  },
-  {
-    organizationType: 'OTHER',
-    label: 'Something else',
-    // The narrowest honest default: stock and money. Anything more would be a
-    // guess, and this is the type chosen precisely when we cannot guess.
-    defaultModules: [MODULE_KEYS.INVENTORY, MODULE_KEYS.FINANCE],
-  },
+  { organizationType: 'SERVICE_INSTALLATION', label: 'Installation / contracting', defaultModules: [...BASE, MODULE_KEYS.PROJECTS] },
+  // Spec: a manufacturer sells what it makes in bulk, so Wholesale, not Projects.
+  { organizationType: 'MANUFACTURING', label: 'Manufacturing / production', defaultModules: [...BASE, ...WHOLESALE] },
+  // The narrowest honest default, chosen precisely when we cannot guess.
+  { organizationType: 'OTHER', label: 'Something else', defaultModules: [...BASE] },
 ];
 
 export const ORGANIZATION_TYPES = INDUSTRIES.map((i) => i.organizationType);

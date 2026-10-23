@@ -3,6 +3,7 @@ import { z } from 'zod';
 import bcrypt from 'bcrypt';
 import { prisma } from '../db.js';
 import { generateToken, verifyToken } from '../lib/jwt.js';
+import { deviceKeyFor } from '../lib/deviceKey.js';
 import { MODULE_KEYS, MODULES_CONFIG, OWNER_PERMANENT_MODULES } from '../config/modules.js';
 import { ORGANIZATION_TYPES } from '../config/industries.js';
 import { isValidSlug, generateSlug } from '../lib/slug.js';
@@ -413,6 +414,19 @@ export const signup = async (req: Request, res: Response) => {
       });
     }
 
+    void logAudit({
+      tenantId: tenant.id,
+      actorType: AuditActorType.OWNER,
+      actorId: tenant.users[0]?.id,
+      action: 'ACCOUNT_SIGNED_UP',
+      module: 'auth',
+      entityType: 'Tenant',
+      entityId: tenant.id,
+      entityLabel: tenant.name,
+      details: { subdomain, organizationType: resolvedOrgType ?? null, modules: tenantModules, billingCycle, startTrial },
+      ...extractRequestContext(req),
+    });
+
     // [PAYMENT_DISABLED] - Restore when payment integration is ready
     // if (paymentMethod) {
     // const subscription = await prisma.subscription.create({
@@ -674,6 +688,7 @@ export const login = async (req: Request, res: Response) => {
         message: 'Login successful',
         data: {
           token,
+          deviceKey: deviceKeyFor(user.tenantId),
           user: {
             id: user.id,
             tenantId: user.tenantId,
@@ -808,6 +823,7 @@ export const login = async (req: Request, res: Response) => {
       message: 'Login successful',
       data: {
         token,
+        deviceKey: deviceKeyFor(employee.tenantId),
         user: {
           id: employee.id,
           tenantId: employee.tenantId,
@@ -1115,6 +1131,7 @@ export const me = async (req: AuthRequest, res: Response) => {
         message: 'User retrieved successfully',
         data: {
           token,
+          deviceKey: deviceKeyFor(user.tenantId),
           user: {
             id: user.id,
             tenantId: user.tenantId,
@@ -1176,6 +1193,7 @@ export const me = async (req: AuthRequest, res: Response) => {
       message: 'User retrieved successfully',
       data: {
         token,
+        deviceKey: deviceKeyFor(employee.tenantId),
         user: {
           id: employee.id,
           tenantId: employee.tenantId,

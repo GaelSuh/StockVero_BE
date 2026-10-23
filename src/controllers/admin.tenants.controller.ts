@@ -49,6 +49,8 @@ const UpdateTenantSchema = z.object({
   city: z.string().optional(),
   notes: z.string().optional(),
   subscriptionPlan: z.enum(['STARTER', 'GROWTH', 'ENTERPRISE']).optional(),
+  /** INTERNAL/DEMO/TEST tenants are excluded from insights by default. */
+  tenantType: z.enum(['CUSTOMER', 'INTERNAL', 'DEMO', 'TEST']).optional(),
 });
 
 const DenyTenantSchema = z.object({
@@ -367,10 +369,11 @@ export const getTenant = async (req: AdminRequest, res: Response) => {
       include: {
         users: {
           where: { role: 'CLIENT_OWNER' },
-          select: { id: true, firstName: true, lastName: true, email: true, phone: true },
+          select: { id: true, firstName: true, lastName: true, email: true, phone: true, lastLoginAt: true, lastSeenAt: true },
         },
         modules: { select: { moduleKey: true, isEnabled: true } },
         approvedByAdmin: { select: { id: true, firstName: true, lastName: true, email: true } },
+        accountOwner: { select: { id: true, firstName: true, lastName: true, email: true } },
         subscription: true,
         paymentMethods: { where: { isDefault: true }, orderBy: { createdAt: 'desc' }, take: 1 },
       },
@@ -383,9 +386,16 @@ export const getTenant = async (req: AdminRequest, res: Response) => {
       });
     }
 
-    const [employeeCount, totalProjects, totalCustomers, totalInventoryItems, totalTransactions, totalIncome, auditLogs, paymentHistory] =
+    const [employees, totalProjects, totalCustomers, totalInventoryItems, totalTransactions, totalIncome, auditLogs, paymentHistory] =
       await Promise.all([
-        prisma.employee.count({ where: { tenantId: tenant.id } }),
+        prisma.employee.findMany({
+          where: { tenantId: tenant.id },
+          orderBy: { createdAt: 'asc' },
+          select: {
+            id: true, firstName: true, lastName: true, email: true, jobTitle: true, isActive: true,
+            lastLoginAt: true, lastSeenAt: true, createdAt: true, role: { select: { name: true } },
+          },
+        }),
         prisma.project.count({ where: { tenantId: tenant.id } }),
         prisma.customer.count({ where: { tenantId: tenant.id } }),
         prisma.inventoryItem.count({ where: { tenantId: tenant.id } }),
@@ -406,6 +416,13 @@ export const getTenant = async (req: AdminRequest, res: Response) => {
           take: 50,
         }),
       ]);
+
+    // Most recent request by anyone in the tenant (owners + employees), from tenantGuard's last-seen.
+    const lastActiveAt =
+      [...tenant.users, ...employees]
+        .map((u: { lastSeenAt: Date | null }) => u.lastSeenAt)
+        .filter((d): d is Date => d instanceof Date)
+        .sort((a, b) => b.getTime() - a.getTime())[0] ?? null;
 
     const paymentMethod = tenant.paymentMethods[0] || null;
     const maskedPaymentMethod = paymentMethod
@@ -472,10 +489,26 @@ export const getTenant = async (req: AdminRequest, res: Response) => {
           currentAnnualAmount: tenant.currentAnnualAmount,
           createdAt: tenant.createdAt,
           themeConfig: tenant.themeConfig,
+          tenantType: tenant.tenantType,
+          accountOwner: tenant.accountOwner,
+          lastActiveAt,
         },
         owner: tenant.users[0] || null,
         enabledModules: tenant.modules.filter(m => m.isEnabled).map(m => m.moduleKey),
-        employeeCount,
+        employeeCount: employees.length,
+        // Shape matches the admin console's Employees tab (TenantDetailPage).
+        employees: employees.map((e) => ({
+          id: e.id,
+          firstName: e.firstName,
+          lastName: e.lastName,
+          email: e.email,
+          jobTitle: e.jobTitle,
+          roleName: e.role?.name ?? null,
+          status: e.isActive ? 'ACTIVE' : 'INACTIVE',
+          lastLoginAt: e.lastLoginAt,
+          lastSeenAt: e.lastSeenAt,
+          createdAt: e.createdAt,
+        })),
         auditLogs,
         billing: {
           subscription: tenant.subscription,
@@ -541,6 +574,7 @@ export const updateTenant = async (req: AdminRequest, res: Response) => {
       'city',
       'notes',
       'subscriptionPlan',
+      'tenantType',
     ] as const) {
       if (updates[field] !== undefined && (tenant as any)[field] !== updates[field]) {
         const nextValue =

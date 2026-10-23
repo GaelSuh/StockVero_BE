@@ -4,10 +4,10 @@ import {
   createSale,
   listSales,
   getSale,
-  updateSale,
   addPaymentToSale,
   getDailySalesSummary,
   getCreditCustomersController,
+  getCreditContactsController,
   resolvePricesController,
   cloneSaleController,
   lookupRetailSaleByCode,
@@ -25,11 +25,12 @@ retailRouter.get('/retail', permissionGuard('retail_sales', 'canRead'), listSale
 retailRouter.get('/retail/lookup/:code', permissionGuard('retail_sales', 'canRead'), lookupRetailSaleByCode);
 retailRouter.get('/retail/:id', permissionGuard('retail_sales', 'canRead'), getSale);
 retailRouter.post('/retail', permissionGuard('retail_sales', 'canCreate'), createSale);
-retailRouter.patch('/retail/:id', permissionGuard('retail_sales', 'canUpdate'), updateSale);
 retailRouter.post('/retail/:id/payments', permissionGuard('retail_sales', 'canUpdate'), addPaymentToSale);
 retailRouter.post('/retail/:id/clone', permissionGuard('retail_sales', 'canRead'), cloneSaleController);
 retailRouter.get('/retail/summary/daily', permissionGuard('retail_sales', 'canRead'), getDailySalesSummary);
 retailRouter.get('/retail/credit/customers', permissionGuard('retail_sales', 'canRead'), getCreditCustomersController);
+// canCreate, not canRead: it is the till's lookup while recording a sale.
+retailRouter.get('/retail/credit/contacts', permissionGuard('retail_sales', 'canCreate'), getCreditContactsController);
 
 // Wholesale sales routes (guarded by wholesale_sales module)
 const wholesaleRouter = Router();
@@ -38,7 +39,6 @@ wholesaleRouter.get('/wholesale', permissionGuard('wholesale_sales', 'canRead'),
 wholesaleRouter.get('/wholesale/lookup/:code', permissionGuard('wholesale_sales', 'canRead'), lookupWholesaleSaleByCode);
 wholesaleRouter.get('/wholesale/:id', permissionGuard('wholesale_sales', 'canRead'), getSale);
 wholesaleRouter.post('/wholesale', permissionGuard('wholesale_sales', 'canCreate'), createSale);
-wholesaleRouter.patch('/wholesale/:id', permissionGuard('wholesale_sales', 'canUpdate'), updateSale);
 wholesaleRouter.post('/wholesale/:id/payments', permissionGuard('wholesale_sales', 'canUpdate'), addPaymentToSale);
 wholesaleRouter.post('/wholesale/:id/clone', permissionGuard('wholesale_sales', 'canRead'), cloneSaleController);
 wholesaleRouter.post('/wholesale/resolve-prices', permissionGuard('wholesale_sales', 'canRead'), resolvePricesController);

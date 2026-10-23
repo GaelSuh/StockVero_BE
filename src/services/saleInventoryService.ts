@@ -1,5 +1,7 @@
 import { prisma } from '../db.js';
 import { isQuantityTracked } from '../lib/stock.js';
+import { QUANTITY_FIELD, UNIT_STATUS, decrementIfAvailable, type StockCondition } from './stockConditionService.js';
+import { broadcastToModule } from './notificationService.js';
 
 type PrismaWriteClient =
   | typeof prisma
@@ -38,6 +40,11 @@ interface ReturnItemForRestoration {
    * caller from the original SaleItem.variantId, never guessed here.
    */
   variantId?: string | null;
+  /**
+   * What came back. GOOD goes back on sale; FAULTY and DAMAGED are set aside:
+   * the unit takes that status, or the quantity lands in that count.
+   */
+  condition?: StockCondition;
 }
 
 /** Thrown to abort the sale transaction outright — nothing gets sold on credit
@@ -59,6 +66,31 @@ export interface DeductStockResult {
    * that was created for that line.
    */
   soldUnitIds: (string | null)[];
+  /** Lines that ended at or below their reorder threshold. Pass to notifyLowStock after commit. */
+  lowStock: LowStockEntry[];
+}
+
+export interface LowStockEntry {
+  categoryId: string;
+  name: string;
+  remaining: number;
+}
+
+/**
+ * Tells everyone who looks after stock — the owner and every employee whose role
+ * can read Inventory — not the cashier who happened to make the sale. Call it
+ * after the transaction commits, so a rolled-back sale never raises an alert.
+ * Never throws: an alert must not fail a sale that already happened.
+ */
+export async function notifyLowStock(tenantId: string, entries: LowStockEntry[], saleNumber: string) {
+  for (const entry of entries) {
+    await broadcastToModule(tenantId, 'inventory', {
+      type: 'inventory.low_stock',
+      title: `Low Stock: ${entry.name}`,
+      message: `Only ${entry.remaining} units remaining after sale #${saleNumber}`,
+      link: `/inventory/categories/${entry.categoryId}`,
+    });
+  }
 }
 
 /**
@@ -84,7 +116,7 @@ export async function deductStockForSale(
   performedBy: string,
 ): Promise<DeductStockResult> {
   const soldUnitIds: (string | null)[] = new Array(items.length).fill(null);
-  const lowStock: Array<{ name: string; remaining: number }> = [];
+  const lowStock: LowStockEntry[] = [];
   const logs: any[] = [];
 
   // One read for the whole cart rather than one per line. Each round trip to a
@@ -186,12 +218,14 @@ export async function deductStockForSale(
 
     if (quantityTracked) {
       if (item.variantId && variant) {
-        const before = variant.quantityOnHand;
-        const settled = before - item.quantity;
-        await (tx as any).productVariant.update({
-          where: { id: item.variantId },
-          data: { quantityOnHand: settled },
-        });
+        const settled = await decrementIfAvailable(tx, 'productVariant', item.variantId, 'quantityOnHand', item.quantity);
+        if (settled === null) {
+          // Spent since it was read (another till, a phone syncing): reject, never go below 0.
+          throw new InsufficientStockError([
+            { productName: displayName, requested: item.quantity, available: Math.max(0, variant.quantityOnHand) },
+          ]);
+        }
+        const before = settled + item.quantity;
         // Two lines can name the same variant — without tracking the running
         // total here, a second line would deduct from stock the first spent.
         variant.quantityOnHand = settled;
@@ -210,15 +244,16 @@ export async function deductStockForSale(
         // Variants carry no reorderThreshold of their own — the parent
         // category's threshold is reused for every one of its variants.
         if (category.reorderThreshold > 0 && settled <= category.reorderThreshold) {
-          lowStock.push({ name: displayName, remaining: settled });
+          lowStock.push({ categoryId: item.categoryId, name: displayName, remaining: settled });
         }
       } else {
-        const currentStock = category.quantityOnHand;
-        const settled = currentStock - item.quantity;
-        await (tx as any).inventoryCategory.update({
-          where: { id: item.categoryId },
-          data: { quantityOnHand: settled },
-        });
+        const settled = await decrementIfAvailable(tx, 'inventoryCategory', item.categoryId, 'quantityOnHand', item.quantity);
+        if (settled === null) {
+          throw new InsufficientStockError([
+            { productName: displayName, requested: item.quantity, available: Math.max(0, category.quantityOnHand) },
+          ]);
+        }
+        const currentStock = settled + item.quantity;
         // Two lines can name the same product — without tracking the running
         // total here, a second line would deduct from the stock the first
         // already spent.
@@ -235,7 +270,7 @@ export async function deductStockForSale(
           performedBy,
         });
         if (category.reorderThreshold > 0 && settled <= category.reorderThreshold) {
-          lowStock.push({ name: displayName, remaining: settled });
+          lowStock.push({ categoryId: item.categoryId, name: displayName, remaining: settled });
         }
       }
       continue;
@@ -325,7 +360,7 @@ export async function deductStockForSale(
       performedBy,
     });
     if (category.reorderThreshold > 0 && after <= category.reorderThreshold) {
-      lowStock.push({ name: displayName, remaining: after });
+      lowStock.push({ categoryId: item.categoryId, name: displayName, remaining: after });
     }
   }
 
@@ -334,20 +369,7 @@ export async function deductStockForSale(
     await (tx as any).categoryStockLog.createMany({ data: logs });
   }
 
-  if (lowStock.length > 0) {
-    await (tx as any).notification.createMany({
-      data: lowStock.map((entry) => ({
-        tenantId,
-        userId: performedBy,
-        userType: 'OWNER',
-        type: 'LOW_STOCK_ALERT',
-        title: `Low Stock: ${entry.name}`,
-        message: `Only ${entry.remaining} units remaining after sale #${saleNumber}`,
-      })),
-    });
-  }
-
-  return { soldUnitIds };
+  return { soldUnitIds, lowStock };
 }
 
 export interface RestoreStockResult {
@@ -355,6 +377,18 @@ export interface RestoreStockResult {
    * was left untouched for these rather than guessed. */
   skipped: Array<{ categoryId: string; productName: string }>;
 }
+
+/** Stock-history event per return condition. GOOD keeps the original name. */
+const RETURN_EVENT: Record<StockCondition, string> = {
+  GOOD: 'RETURN_RESTORATION',
+  FAULTY: 'RETURN_FAULTY',
+  DAMAGED: 'RETURN_DAMAGED',
+};
+
+const returnTitle = (returnNumber: string, productName: string, condition: StockCondition, quantity: number) =>
+  condition === 'GOOD'
+    ? `Return #${returnNumber} - ${productName}`
+    : `Return #${returnNumber} - ${productName}: ${quantity} ${condition === 'FAULTY' ? 'faulty' : 'damaged'}, set aside (not for sale)`;
 
 export async function restoreStockForReturn(
   tx: PrismaWriteClient,
@@ -366,6 +400,7 @@ export async function restoreStockForReturn(
   const skipped: Array<{ categoryId: string; productName: string }> = [];
 
   for (const item of items) {
+    const condition = item.condition ?? 'GOOD';
     const category = await (tx as any).inventoryCategory.findUnique({
       where: { id: item.categoryId },
       select: { id: true, quantityOnHand: true, stockTrackingMode: true },
@@ -403,20 +438,21 @@ export async function restoreStockForReturn(
       if (returned.length > 0) {
         await (tx as any).productItem.updateMany({
           where: { id: { in: returned.map((u: any) => u.id) } },
-          data: { stockStatus: 'AVAILABLE' },
+          data: { stockStatus: UNIT_STATUS[condition] },
         });
       }
+      const restored = condition === 'GOOD' ? returned.length : 0;
       await (tx as any).categoryStockLog.create({
         data: {
           tenantId,
           categoryId: item.categoryId,
           variantId: item.variantId ?? null,
-          eventType: 'RETURN_RESTORATION',
+          eventType: RETURN_EVENT[condition],
           unitSystemId: returned[0]?.systemId ?? null,
           stockBefore: before,
-          stockAfter: before + returned.length,
-          delta: returned.length,
-          title: `Return #${returnNumber} - ${item.productName}`,
+          stockAfter: before + restored,
+          delta: restored,
+          title: returnTitle(returnNumber, item.productName, condition, returned.length),
           performedBy,
         },
       });
@@ -432,21 +468,21 @@ export async function restoreStockForReturn(
         select: { quantityOnHand: true },
       });
       const currentStock = variant?.quantityOnHand ?? 0;
-      const newStock = currentStock + item.quantity;
+      const newStock = condition === 'GOOD' ? currentStock + item.quantity : currentStock;
       await (tx as any).productVariant.update({
         where: { id: item.variantId },
-        data: { quantityOnHand: newStock },
+        data: { [QUANTITY_FIELD[condition]]: { increment: item.quantity } },
       });
       await (tx as any).categoryStockLog.create({
         data: {
           tenantId,
           categoryId: item.categoryId,
           variantId: item.variantId,
-          eventType: 'RETURN_RESTORATION',
+          eventType: RETURN_EVENT[condition],
           stockBefore: currentStock,
           stockAfter: newStock,
-          delta: item.quantity,
-          title: `Return #${returnNumber} - ${item.productName}`,
+          delta: newStock - currentStock,
+          title: returnTitle(returnNumber, item.productName, condition, item.quantity),
           performedBy,
         },
       });
@@ -454,22 +490,22 @@ export async function restoreStockForReturn(
     }
 
     const currentStock = category.quantityOnHand;
-    const newStock = currentStock + item.quantity;
+    const newStock = condition === 'GOOD' ? currentStock + item.quantity : currentStock;
 
     await (tx as any).inventoryCategory.update({
       where: { id: item.categoryId },
-      data: { quantityOnHand: newStock },
+      data: { [QUANTITY_FIELD[condition]]: { increment: item.quantity } },
     });
 
     await (tx as any).categoryStockLog.create({
       data: {
         tenantId,
         categoryId: item.categoryId,
-        eventType: 'RETURN_RESTORATION',
+        eventType: RETURN_EVENT[condition],
         stockBefore: currentStock,
         stockAfter: newStock,
-        delta: item.quantity,
-        title: `Return #${returnNumber} - ${item.productName}`,
+        delta: newStock - currentStock,
+        title: returnTitle(returnNumber, item.productName, condition, item.quantity),
         performedBy,
       },
     });

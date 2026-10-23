@@ -5,7 +5,7 @@ import { prisma } from '../db.js';
 import { AuthRequest } from '../types/index.js';
 import { resolveSignedUrl, deleteStoredFile } from '../lib/storage.js';
 import { broadcastToModule } from '../services/notificationService.js';
-import { logAudit, extractRequestContext, AuditActorType } from '../services/auditService.js';
+import { logAudit, auditRequest, extractRequestContext, AuditActorType } from '../services/auditService.js';
 import { readTenantSettings } from '../lib/tenantSettings.js';
 
 const UpdateModuleSchema = z.object({
@@ -269,6 +269,16 @@ export const updateTenantModule = async (req: AuthRequest, res: Response) => {
       title: 'Module Access Changed',
       message: `The ${req.params.key} module has been ${parsed.data.isEnabled ? 'enabled' : 'disabled'} for your organization.`,
       link: '/admin',
+    });
+
+    auditRequest(req, {
+      tenantId,
+      action: parsed.data.isEnabled ? 'MODULE_ENABLED' : 'MODULE_DISABLED',
+      module: 'settings',
+      entityType: 'TenantModule',
+      entityId: updated.id,
+      entityLabel: moduleExists.displayName,
+      details: { moduleKey: req.params.key, isEnabled: parsed.data.isEnabled },
     });
 
     return res.json({

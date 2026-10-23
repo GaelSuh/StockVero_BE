@@ -2,6 +2,10 @@
 import { z } from 'zod';
 import { AuthRequest } from '../types/index.js';
 import { supabase, STORAGE_BUCKET, deleteStorageFiles, extractStorageKey } from '../lib/storage.js';
+import { auditRequest } from '../services/auditService.js';
+
+// Upload context -> audit module key.
+const AUDIT_MODULE: Record<string, string> = { inventory: 'inventory', customer: 'contacts', project: 'projects', profile: 'settings' };
 
 const UploadSchema = z.object({
   context: z.enum(['inventory', 'customer', 'project', 'profile']),
@@ -52,6 +56,14 @@ export const uploadFile = async (req: AuthRequest, res: Response) => {
     }
 
     const { data: { publicUrl } } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(key);
+    auditRequest(req, {
+      action: 'FILE_UPLOADED',
+      module: AUDIT_MODULE[parsed.data.context] ?? 'settings',
+      entityType: 'File',
+      entityId: key,
+      entityLabel: req.file.originalname,
+      details: { context: parsed.data.context, size: req.file.size, mimeType: req.file.mimetype },
+    });
     return res.status(201).json({
       success: true,
       message: 'File uploaded successfully',
@@ -85,7 +97,21 @@ export const deleteFile = async (req: AuthRequest, res: Response) => {
       return res.status(200).json({ success: true, message: 'File removed' });
     }
 
+    // Keys are `${tenantId}/${context}/${filename}`: only this tenant's own files may be deleted.
+    const [owner, context, filename] = key.split('/');
+    if (owner !== req.tenantId) {
+      return res.status(403).json({ success: false, message: 'You can only delete your own files' });
+    }
+
     await deleteStorageFiles([url]);
+    auditRequest(req, {
+      action: 'FILE_DELETED',
+      module: AUDIT_MODULE[context] ?? 'settings',
+      entityType: 'File',
+      entityId: key,
+      entityLabel: filename ?? key,
+      details: { context },
+    });
 
     return res.status(200).json({ success: true, message: 'File deleted successfully' });
   } catch (error) {
