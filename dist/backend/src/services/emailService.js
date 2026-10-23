@@ -51,4 +51,5 @@ export async function sendEmail({ to, subject, html, }) {
     if (!sent) {
         console.warn(`[email] No email provider configured — skipping email to ${to}: ${subject}`);
     }
+    return sent;
 }

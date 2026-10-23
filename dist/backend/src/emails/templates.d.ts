@@ -32,6 +32,10 @@ export declare function forgotPassword(params: {
     name: string;
     otpCode: string;
 }): string;
+export declare function emailVerification(params: {
+    name: string;
+    otpCode: string;
+}): string;
 export declare function trialEndingWarning(params: {
     ownerName: string;
     orgName: string;

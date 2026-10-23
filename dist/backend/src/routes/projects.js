@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { tenantGuard, moduleGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
 import { prisma } from '../db.js';
+import { checkProjectDependencies } from '../services/dependencyCheckService.js';
 import { createProject, listProjects as listProjectsController, getProject, updateProject, updateProjectStatus, deleteProject, createMilestone, updateMilestone, deleteMilestone, addMaterial, updateMaterial, deleteMaterial, removeMaterialItem, listAssignments, createAssignment, deleteAssignment, addProjectExpense, deleteProjectExpense, } from '../controllers/projects.controller.js';
 const router = Router();
 router.use(tenantGuard, mustChangePasswordGuard, moduleGuard('projects'));
@@ -211,7 +212,22 @@ router.patch('/:id/status', permissionGuard('projects', 'canUpdate'), updateProj
  *       204:
  *         description: Project deleted
  */
-router.delete('/:id', permissionGuard('projects', 'canDelete'), deleteProject);
+router.get('/:id/can-delete', permissionGuard('projects', 'canDelete'), async (req, res) => {
+    try {
+        const report = await checkProjectDependencies(req.params.id, req.tenantId);
+        return res.json({ success: true, data: report });
+    }
+    catch (error) {
+        return res.status(500).json({ success: false, message: 'Dependency check failed' });
+    }
+});
+router.delete('/:id', permissionGuard('projects', 'canDelete'), async (req, res) => {
+    const report = await checkProjectDependencies(req.params.id, req.tenantId);
+    if (!report.canDelete) {
+        return res.status(409).json({ success: false, message: 'Cannot delete: unresolved dependencies', data: report });
+    }
+    return deleteProject(req, res);
+});
 /**
  * @openapi
  * /api/v1/projects/{id}/milestones:

@@ -1,8 +1,9 @@
 import { Router } from 'express';
-import { tenantGuard, mustChangePasswordGuard, adminGuard } from '../middleware/auth.js';
+import { tenantGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
+import { checkEmployeeDependencies } from '../services/dependencyCheckService.js';
 import { listEmployees, getEmployee, createEmployee, updateEmployee, updateEmployeeRole, updateEmployeeStatus, resetEmployeePassword, deleteEmployee, } from '../controllers/employees.controller.js';
 const router = Router();
-router.use(tenantGuard, mustChangePasswordGuard, adminGuard);
+router.use(tenantGuard, mustChangePasswordGuard);
 /**
  * @openapi
  * /api/v1/employees:
@@ -27,7 +28,7 @@ router.use(tenantGuard, mustChangePasswordGuard, adminGuard);
  *       200:
  *         description: Employees retrieved
  */
-router.get('/', listEmployees);
+router.get('/', permissionGuard('administration', 'canRead'), listEmployees);
 /**
  * @openapi
  * /api/v1/employees:
@@ -65,7 +66,7 @@ router.get('/', listEmployees);
  *       201:
  *         description: Employee created
  */
-router.post('/', createEmployee);
+router.post('/', permissionGuard('administration', 'canCreate'), createEmployee);
 /**
  * @openapi
  * /api/v1/employees/{id}:
@@ -82,7 +83,7 @@ router.post('/', createEmployee);
  *       200:
  *         description: Employee retrieved
  */
-router.get('/:id', getEmployee);
+router.get('/:id', permissionGuard('administration', 'canRead'), getEmployee);
 /**
  * @openapi
  * /api/v1/employees/{id}:
@@ -125,7 +126,7 @@ router.get('/:id', getEmployee);
  *       200:
  *         description: Employee updated
  */
-router.patch('/:id', updateEmployee);
+router.patch('/:id', permissionGuard('administration', 'canCreate'), updateEmployee);
 /**
  * @openapi
  * /api/v1/employees/{id}/role:
@@ -153,7 +154,7 @@ router.patch('/:id', updateEmployee);
  *       200:
  *         description: Employee role updated
  */
-router.patch('/:id/role', updateEmployeeRole);
+router.patch('/:id/role', permissionGuard('administration', 'canCreate'), updateEmployeeRole);
 /**
  * @openapi
  * /api/v1/employees/{id}/status:
@@ -197,7 +198,7 @@ router.patch('/:id/status', updateEmployeeStatus);
  *       200:
  *         description: Password reset
  */
-router.patch('/:id/reset-password', resetEmployeePassword);
+router.patch('/:id/reset-password', permissionGuard('administration', 'canCreate'), resetEmployeePassword);
 /**
  * @openapi
  * /api/v1/employees/{id}:
@@ -214,5 +215,20 @@ router.patch('/:id/reset-password', resetEmployeePassword);
  *       200:
  *         description: Employee deactivated
  */
-router.delete('/:id', deleteEmployee);
+router.get('/:id/can-delete', permissionGuard('administration', 'canCreate'), async (req, res) => {
+    try {
+        const report = await checkEmployeeDependencies(req.params.id, req.tenantId);
+        return res.json({ success: true, data: report });
+    }
+    catch (error) {
+        return res.status(500).json({ success: false, message: 'Dependency check failed' });
+    }
+});
+router.delete('/:id', permissionGuard('administration', 'canCreate'), async (req, res) => {
+    const report = await checkEmployeeDependencies(req.params.id, req.tenantId);
+    if (!report.canDelete) {
+        return res.status(409).json({ success: false, message: 'Cannot delete: unresolved dependencies', data: report });
+    }
+    return deleteEmployee(req, res);
+});
 export default router;

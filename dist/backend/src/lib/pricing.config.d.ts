@@ -28,6 +28,16 @@ export declare const PRICING_MODULES: readonly [{
     readonly displayName: "Analytics";
     readonly description: "Business insights and reporting";
     readonly monthlyPrice: 3500;
+}, {
+    readonly key: "retail_sales";
+    readonly displayName: "Retail Sales";
+    readonly description: "Point of sale for retail counter selling";
+    readonly monthlyPrice: 5000;
+}, {
+    readonly key: "wholesale_sales";
+    readonly displayName: "Wholesale Sales";
+    readonly description: "Bulk order management for B2B selling";
+    readonly monthlyPrice: 5500;
 }];
 export declare const PRICING_MODULE_KEYS: string[];
 export declare const ORGANISATION_SIZE_SURCHARGES: {
@@ -93,9 +103,9 @@ export declare function calculatePricing(params: {
     billingCycle: BillingCycle;
 }): {
     modules: {
-        key: "dashboard" | "inventory" | "crm" | "projects" | "finance" | "analytics";
-        displayName: "Dashboard" | "Inventory" | "CRM" | "Projects" | "Finance" | "Analytics";
-        description: "Overview metrics and summaries" | "Manage items, movements, and stock levels" | "CRM for customer relationships" | "Project tracking with milestones and materials" | "Financial ledger and reporting" | "Business insights and reporting";
+        key: "dashboard" | "inventory" | "crm" | "projects" | "finance" | "analytics" | "retail_sales" | "wholesale_sales";
+        displayName: "Dashboard" | "Inventory" | "CRM" | "Projects" | "Finance" | "Analytics" | "Retail Sales" | "Wholesale Sales";
+        description: "Overview metrics and summaries" | "Manage items, movements, and stock levels" | "CRM for customer relationships" | "Project tracking with milestones and materials" | "Financial ledger and reporting" | "Business insights and reporting" | "Point of sale for retail counter selling" | "Bulk order management for B2B selling";
         monthlyPrice: 0 | 5000 | 4000 | 6000 | 5500 | 3500;
     }[];
     surcharge: {

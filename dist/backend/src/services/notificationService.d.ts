@@ -16,6 +16,7 @@ interface BroadcastParams {
     link?: string;
 }
 export declare function sendNotification(params: SendNotificationParams): Promise<{
+    message: string;
     tenantId: string;
     id: string;
     userId: string;
@@ -24,7 +25,6 @@ export declare function sendNotification(params: SendNotificationParams): Promis
     userType: import("@prisma/client").$Enums.NotificationUserType;
     type: string;
     title: string;
-    message: string;
     isRead: boolean;
 } | null>;
 export declare function broadcastToTenant(tenantId: string, params: BroadcastParams): Promise<void>;

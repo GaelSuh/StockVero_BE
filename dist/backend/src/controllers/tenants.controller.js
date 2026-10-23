@@ -1,8 +1,10 @@
+import { ORGANIZATION_TYPES, INDUSTRIES } from '../config/industries.js';
 import { z } from 'zod';
 import { prisma } from '../db.js';
 import { resolveSignedUrl, deleteStoredFile } from '../lib/storage.js';
 import { broadcastToModule } from '../services/notificationService.js';
 import { logAudit, extractRequestContext, AuditActorType } from '../services/auditService.js';
+import { readTenantSettings } from '../lib/tenantSettings.js';
 const UpdateModuleSchema = z.object({
     isEnabled: z.boolean(),
 });
@@ -38,8 +40,12 @@ export const getTenantModules = async (req, res) => {
 const UpdateTenantMeSchema = z.object({
     name: z.string().min(1).optional(),
     industry: z.string().optional(),
+    /** Business type. Drives suggested modules; never restricts them. */
+    organizationType: z.enum(ORGANIZATION_TYPES).optional(),
     website: z.string().optional(),
     logoUrl: z.string().nullable().optional(),
+    /** Owner-controlled: put stock purchases in front of finance before units land. */
+    stockApprovalRequired: z.boolean().optional(),
 });
 export const updateMyTenant = async (req, res) => {
     try {
@@ -50,12 +56,26 @@ export const updateMyTenant = async (req, res) => {
                 message: parsed.error.issues[0]?.message || 'Invalid payload',
             });
         }
-        const { name, industry, website, logoUrl } = parsed.data;
+        const { name, industry, organizationType, website, logoUrl, stockApprovalRequired } = parsed.data;
         const updates = {};
+        // Merged rather than replaced — settingsConfig is a shared bag and other
+        // keys will land in it later.
+        if (stockApprovalRequired !== undefined) {
+            const current = await prisma.tenant.findUnique({
+                where: { id: req.tenantId },
+                select: { settingsConfig: true },
+            });
+            updates.settingsConfig = {
+                ...readTenantSettings(current),
+                stockApprovalRequired,
+            };
+        }
         if (name !== undefined)
             updates.name = name;
         if (industry !== undefined)
             updates.industry = industry || null;
+        if (organizationType !== undefined)
+            updates.organizationType = organizationType;
         if (website !== undefined)
             updates.website = website || null;
         if (logoUrl !== undefined)
@@ -72,7 +92,18 @@ export const updateMyTenant = async (req, res) => {
         const updated = await prisma.tenant.update({
             where: { id: req.tenantId },
             data: updates,
-            select: { id: true, name: true, industry: true, website: true, logoUrl: true },
+            // organizationType is selected back deliberately: it was being written and
+            // then omitted from the response, so the client could not tell whether the
+            // change had taken.
+            select: {
+                id: true,
+                name: true,
+                industry: true,
+                organizationType: true,
+                website: true,
+                logoUrl: true,
+                settingsConfig: true,
+            },
         });
         // Notify authorized users
         await broadcastToModule(req.tenantId, 'settings', {
@@ -84,7 +115,7 @@ export const updateMyTenant = async (req, res) => {
         const logoUrlSigned = await resolveSignedUrl(updated.logoUrl);
         void logAudit({
             tenantId: req.tenantId,
-            actorType: AuditActorType.OWNER,
+            actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
             actorId: req.user?.id,
             action: 'COMPANY_UPDATED',
             module: 'settings',
@@ -144,7 +175,7 @@ export const updateMyTenantTheme = async (req, res) => {
         });
         void logAudit({
             tenantId: req.tenantId,
-            actorType: AuditActorType.OWNER,
+            actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
             actorId: req.user?.id,
             action: 'THEME_CHANGED',
             module: 'settings',
@@ -189,12 +220,26 @@ export const updateTenantModule = async (req, res) => {
                 message: 'Module not found',
             });
         }
-        const updated = await prisma.tenantModule.update({
+        // upsert, not update: a module the tenant never selected at signup has no
+        // row at all, so switching it on later failed with a record-not-found error
+        // rather than enabling anything.
+        //
+        // Disabling only flips the flag. Nothing is deleted — the module disappears
+        // from the menu and its routes are refused, and switching it back on brings
+        // everything with it.
+        const updated = await prisma.tenantModule.upsert({
             where: { tenantId_moduleKey: { tenantId, moduleKey: req.params.key } },
-            data: {
+            update: {
                 isEnabled: parsed.data.isEnabled,
                 enabledAt: parsed.data.isEnabled ? new Date() : undefined,
                 disabledAt: parsed.data.isEnabled ? null : new Date(),
+            },
+            create: {
+                tenantId,
+                moduleKey: req.params.key,
+                isEnabled: parsed.data.isEnabled,
+                enabledAt: parsed.data.isEnabled ? new Date() : undefined,
+                disabledAt: parsed.data.isEnabled ? undefined : new Date(),
             },
         });
         // Notify authorized users
@@ -202,7 +247,7 @@ export const updateTenantModule = async (req, res) => {
             type: 'tenant.module.updated',
             title: 'Module Access Changed',
             message: `The ${req.params.key} module has been ${parsed.data.isEnabled ? 'enabled' : 'disabled'} for your organization.`,
-            link: '/administration',
+            link: '/admin',
         });
         return res.json({
             success: true,
@@ -218,4 +263,14 @@ export const updateTenantModule = async (req, res) => {
             error: error instanceof Error ? error.message : 'Unknown error',
         });
     }
+};
+/**
+ * The business types on offer, with the modules each suggests.
+ *
+ * Served rather than duplicated as a constant in the client so the two cannot
+ * drift: this file decides what may be stored, so it should also decide what is
+ * offered.
+ */
+export const listIndustries = async (_req, res) => {
+    return res.json({ success: true, data: INDUSTRIES });
 };

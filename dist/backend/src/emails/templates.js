@@ -107,6 +107,11 @@ export function forgotPassword(params) {
     const body = `Hi ${name}, you requested a password reset. Your one-time code is: ${otpCode}. This code expires in 15 minutes. If you did not request this, ignore this email.${otpBox(otpCode)}`;
     return baseTemplate('Your StockVero password reset code', body);
 }
+export function emailVerification(params) {
+    const { name, otpCode } = params;
+    const body = `Hi ${name}, welcome to StockVero. Please confirm this email address by entering the code below. This code expires in 15 minutes. If you did not create a StockVero account, you can safely ignore this email.${otpBox(otpCode)}`;
+    return baseTemplate('Confirm your email — StockVero', body);
+}
 export function trialEndingWarning(params) {
     const { ownerName, orgName, trialEndsAt, billingAmount, billingCycle, billingUrl } = params;
     const body = `Hi ${ownerName}, your free trial for ${orgName} ends on ${trialEndsAt}. After that you will be charged ${billingAmount} XAF ${billingCycle}. Make sure your payment details are up to date.`;

@@ -243,7 +243,7 @@ export const createEmployee = async (req, res) => {
             type: 'administration.employee.created',
             title: 'New Employee Added',
             message: `${employee.firstName} ${employee.lastName} has been added to the team.`,
-            link: `/administration/employees/${employee.id}`,
+            link: `/admin/employees/${employee.id}`,
         });
         // Welcome notification to the user
         const tenant = await prisma.tenant.findUnique({
@@ -274,7 +274,7 @@ export const createEmployee = async (req, res) => {
         // TODO: In production, verify EMAIL_FROM domain in Resend dashboard
         void logAudit({
             tenantId: req.tenantId,
-            actorType: AuditActorType.OWNER,
+            actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
             actorId: req.user?.id,
             action: 'EMPLOYEE_CREATED',
             module: 'administration',
@@ -402,7 +402,7 @@ export const updateEmployee = async (req, res) => {
             type: 'administration.employee.updated',
             title: 'Employee Profile Updated',
             message: `The profile of ${updatedEmployee.firstName} ${updatedEmployee.lastName} has been updated.`,
-            link: `/administration/employees/${updatedEmployee.id}`,
+            link: `/admin/employees/${updatedEmployee.id}`,
         });
         void logAudit({
             tenantId: req.tenantId,
@@ -483,7 +483,7 @@ export const updateEmployeeRole = async (req, res) => {
             type: 'administration.employee.role_updated',
             title: 'Employee Role Changed',
             message: `${updatedEmployee.firstName}'s role has been updated to ${role.name}.`,
-            link: `/administration/employees/${updatedEmployee.id}`,
+            link: `/admin/employees/${updatedEmployee.id}`,
         });
         return res.json({
             success: true,
@@ -548,11 +548,11 @@ export const updateEmployeeStatus = async (req, res) => {
             type: 'administration.employee.status_updated',
             title: 'Employee Status Changed',
             message: `${updatedEmployee.firstName}'s account has been ${updatedEmployee.isActive ? 'activated' : 'deactivated'}.`,
-            link: `/administration/employees/${updatedEmployee.id}`,
+            link: `/admin/employees/${updatedEmployee.id}`,
         });
         void logAudit({
             tenantId: req.tenantId,
-            actorType: AuditActorType.OWNER,
+            actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
             actorId: req.user?.id,
             action: updatedEmployee.isActive ? 'EMPLOYEE_REACTIVATED' : 'EMPLOYEE_DEACTIVATED',
             module: 'administration',
@@ -626,7 +626,7 @@ export const resetEmployeePassword = async (req, res) => {
         // TODO: In production, verify EMAIL_FROM domain in Resend dashboard
         void logAudit({
             tenantId: req.tenantId,
-            actorType: AuditActorType.OWNER,
+            actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
             actorId: req.user?.id,
             action: 'EMPLOYEE_PASSWORD_RESET',
             module: 'administration',
@@ -673,11 +673,13 @@ export const deleteEmployee = async (req, res) => {
             type: 'administration.employee.deleted',
             title: 'Employee Deactivated',
             message: `${employee.firstName} ${employee.lastName}'s account has been deactivated.`,
-            link: '/administration/employees',
+            // The update above is not assigned; the employee being deactivated is the
+            // one already loaded, and its id is the same one that was just updated.
+            link: `/admin/employees/${employee.id}`,
         });
         void logAudit({
             tenantId: req.tenantId,
-            actorType: AuditActorType.OWNER,
+            actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
             actorId: req.user?.id,
             action: 'EMPLOYEE_DEACTIVATED',
             module: 'administration',

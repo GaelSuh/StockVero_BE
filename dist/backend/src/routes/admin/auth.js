@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { adminLogin, adminLogout, adminMe } from '../../controllers/admin.auth.controller.js';
 import { adminGuard } from '../../middleware/adminAuth.js';
+import { authLimiter } from '../../middleware/rateLimit.js';
 const router = Router();
 /**
  * @openapi
@@ -26,7 +27,7 @@ const router = Router();
  *       200:
  *         description: Login successful
  */
-router.post('/auth/login', adminLogin);
+router.post('/auth/login', authLimiter, adminLogin);
 /**
  * @openapi
  * /api/admin/v1/auth/me:

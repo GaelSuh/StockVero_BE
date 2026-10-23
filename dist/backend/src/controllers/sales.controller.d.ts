@@ -1,0 +1,13 @@
+import { Response } from 'express';
+import { AuthRequest } from '../types/index.js';
+export declare function createSale(req: AuthRequest, res: Response): Promise<Response<any, Record<string, any>>>;
+export declare function listSales(req: AuthRequest, res: Response): Promise<Response<any, Record<string, any>>>;
+export declare function getSale(req: AuthRequest, res: Response): Promise<Response<any, Record<string, any>>>;
+export declare const lookupRetailSaleByCode: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare const lookupWholesaleSaleByCode: (req: AuthRequest, res: Response) => Promise<Response<any, Record<string, any>>>;
+export declare function updateSale(req: AuthRequest, res: Response): Promise<Response<any, Record<string, any>>>;
+export declare function addPaymentToSale(req: AuthRequest, res: Response): Promise<Response<any, Record<string, any>>>;
+export declare function getDailySalesSummary(req: AuthRequest, res: Response): Promise<Response<any, Record<string, any>>>;
+export declare function getCreditCustomersController(req: AuthRequest, res: Response): Promise<Response<any, Record<string, any>>>;
+export declare function resolvePricesController(req: AuthRequest, res: Response): Promise<Response<any, Record<string, any>>>;
+export declare function cloneSaleController(req: AuthRequest, res: Response): Promise<Response<any, Record<string, any>>>;

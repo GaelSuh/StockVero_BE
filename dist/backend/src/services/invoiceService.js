@@ -1,5 +1,5 @@
 import { prisma } from '../db.js';
-import { checkSufficientFunds, recordIncome, recordExpense } from './balanceService.js';
+import { checkSufficientFunds, recordIncome, applyExpense } from './balanceService.js';
 // ── Invoice number generator ───────────────────────────────────────────────────
 export async function generateInvoiceNumber(tenantId) {
     const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
@@ -277,12 +277,24 @@ export async function deductUnitCost(productItemId, categoryId, tenantId) {
     });
     if (!category)
         return;
-    const invoice = await prisma.invoice.findFirst({
-        where: { categoryId, status: 'APPROVED', type: 'PURCHASE' },
-    });
+    const linked = category.approvedInvoiceId
+        ? await prisma.invoice.findUnique({
+            where: { id: category.approvedInvoiceId },
+        })
+        : null;
+    const invoice = linked && linked.type === 'PURCHASE' && linked.status === 'APPROVED'
+        ? linked
+        : await prisma.invoice.findFirst({
+            where: { categoryId, status: 'APPROVED', type: 'PURCHASE' },
+            orderBy: { createdAt: 'desc' },
+        });
     const costAmount = Number(category.costPrice ?? 0);
     await prisma.$transaction(async (tx) => {
-        await recordExpense(tenantId, costAmount, tx);
+        // applyExpense, not recordExpense: a unit that has arrived was already paid
+        // for. Refusing to write it down because the recorded balance is short would
+        // just stop the ledger ever catching up. recordExpense keeps its blocking
+        // behaviour for project spend, which is an authorisation, not a record.
+        await applyExpense(tenantId, costAmount, tx);
         await tx.transaction.create({
             data: {
                 tenantId,

@@ -1,8 +1,9 @@
 import { Router } from 'express';
-import { tenantGuard, mustChangePasswordGuard, adminGuard } from '../middleware/auth.js';
+import { tenantGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
+import { checkRoleDependencies } from '../services/dependencyCheckService.js';
 import { listRoles, getRole, createRole, updateRole, deleteRole, } from '../controllers/roles.controller.js';
 const router = Router();
-router.use(tenantGuard, mustChangePasswordGuard, adminGuard);
+router.use(tenantGuard, mustChangePasswordGuard);
 /**
  * @openapi
  * /api/v1/roles:
@@ -13,7 +14,7 @@ router.use(tenantGuard, mustChangePasswordGuard, adminGuard);
  *       200:
  *         description: Roles retrieved
  */
-router.get('/', listRoles);
+router.get('/', permissionGuard('administration', 'canRead'), listRoles);
 /**
  * @openapi
  * /api/v1/roles:
@@ -59,7 +60,7 @@ router.get('/', listRoles);
  *       201:
  *         description: Role created
  */
-router.post('/', createRole);
+router.post('/', permissionGuard('administration', 'canCreate'), createRole);
 /**
  * @openapi
  * /api/v1/roles/{id}:
@@ -76,7 +77,7 @@ router.post('/', createRole);
  *       200:
  *         description: Role retrieved
  */
-router.get('/:id', getRole);
+router.get('/:id', permissionGuard('administration', 'canRead'), getRole);
 /**
  * @openapi
  * /api/v1/roles/{id}:
@@ -128,7 +129,7 @@ router.get('/:id', getRole);
  *       200:
  *         description: Role updated
  */
-router.patch('/:id', updateRole);
+router.patch('/:id', permissionGuard('administration', 'canCreate'), updateRole);
 /**
  * @openapi
  * /api/v1/roles/{id}:
@@ -145,5 +146,20 @@ router.patch('/:id', updateRole);
  *       200:
  *         description: Role deleted
  */
-router.delete('/:id', deleteRole);
+router.get('/:id/can-delete', permissionGuard('administration', 'canCreate'), async (req, res) => {
+    try {
+        const report = await checkRoleDependencies(req.params.id, req.tenantId);
+        return res.json({ success: true, data: report });
+    }
+    catch (error) {
+        return res.status(500).json({ success: false, message: 'Dependency check failed' });
+    }
+});
+router.delete('/:id', permissionGuard('administration', 'canCreate'), async (req, res) => {
+    const report = await checkRoleDependencies(req.params.id, req.tenantId);
+    if (!report.canDelete) {
+        return res.status(409).json({ success: false, message: 'Cannot delete: unresolved dependencies', data: report });
+    }
+    return deleteRole(req, res);
+});
 export default router;
