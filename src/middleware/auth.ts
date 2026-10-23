@@ -4,6 +4,26 @@ import { UnauthorizedError, ForbiddenError, isDatabaseUnreachable } from '../lib
 import { AuthRequest } from '../types/index.js';
 import { UserRole } from '@prisma/client';
 import { prisma } from '../db.js';
+import { Prisma } from '@prisma/client';
+
+/** last_seen_at is written at most this often per user. */
+const LAST_SEEN_INTERVAL_MS = 5 * 60 * 1000;
+
+/**
+ * Record that a tenant user was active, without slowing or failing the request.
+ * The guard has already read last_seen_at, so a fresh value costs nothing; a stale one
+ * fires one UPDATE that is not awaited. Raw SQL so the row's updated_at is not bumped
+ * every five minutes, and the WHERE re-checks staleness so concurrent requests write once.
+ */
+function touchLastSeen(table: 'users' | 'employees', id: string, lastSeenAt: Date | null): void {
+  const now = Date.now();
+  if (lastSeenAt && now - lastSeenAt.getTime() < LAST_SEEN_INTERVAL_MS) return;
+  const cutoff = new Date(now - LAST_SEEN_INTERVAL_MS);
+  prisma
+    .$executeRaw(Prisma.sql`UPDATE ${Prisma.raw(table)} SET last_seen_at = ${new Date(now)}
+      WHERE id = ${id} AND (last_seen_at IS NULL OR last_seen_at < ${cutoff})`)
+    .catch((err) => console.warn(`[last-seen] ${table} ${id}: ${String(err?.message ?? err).replace(/\s+/g, ' ').trim()}`));
+}
 
 export async function tenantGuard(req: AuthRequest, res: Response, next: NextFunction) {
   try {
@@ -30,7 +50,7 @@ export async function tenantGuard(req: AuthRequest, res: Response, next: NextFun
       }
       const user = await prisma.user.findUnique({
         where: { id: decoded.userId },
-        select: { tenantId: true, tokenVersion: true, isActive: true },
+        select: { tenantId: true, tokenVersion: true, isActive: true, lastSeenAt: true },
       });
 
       if (!user || user.tenantId !== decoded.tenantId) {
@@ -48,6 +68,8 @@ export async function tenantGuard(req: AuthRequest, res: Response, next: NextFun
       if (user.tokenVersion !== decoded.tokenVersion) {
         return res.status(401).json({ code: 'INVALID_TOKEN', error: 'Invalid token' });
       }
+
+      touchLastSeen('users', decoded.userId, user.lastSeenAt);
     }
 
     if (decoded.accountType === 'employee') {
@@ -56,7 +78,7 @@ export async function tenantGuard(req: AuthRequest, res: Response, next: NextFun
       }
       const employee = await prisma.employee.findUnique({
         where: { id: decoded.userId },
-        select: { tenantId: true, tokenVersion: true, isActive: true },
+        select: { tenantId: true, tokenVersion: true, isActive: true, lastSeenAt: true },
       });
 
       if (!employee || employee.tenantId !== decoded.tenantId) {
@@ -70,6 +92,8 @@ export async function tenantGuard(req: AuthRequest, res: Response, next: NextFun
       if (typeof decoded.tokenVersion !== 'number' || employee.tokenVersion !== decoded.tokenVersion) {
         return res.status(401).json({ code: 'INVALID_TOKEN', error: 'Invalid token' });
       }
+
+      touchLastSeen('employees', decoded.userId, employee.lastSeenAt);
     }
 
     req.user = {

@@ -4,9 +4,14 @@ import { resolvePersonName, backfillPersonName } from '../lib/personName.js';
 import { AuthRequest } from '../types/index.js';
 import { getNextSaleNumber } from '../services/saleService.js';
 import { recordSaleAsIncome, recordSaleTipAsIncome } from '../services/saleFinanceService.js';
-import { deductStockForSale, validateStockAvailability, InsufficientStockError } from '../services/saleInventoryService.js';
+import { deductStockForSale, validateStockAvailability, InsufficientStockError, notifyLowStock, type LowStockEntry } from '../services/saleInventoryService.js';
 import { resolvePricesForSale } from '../services/priceResolutionService.js';
-import { findOrCreateCreditCustomer } from '../services/creditCustomerService.js';
+import { costFields, currentUnitCosts } from '../services/saleCostService.js';
+import { auditRequest, AuditStatus } from '../services/auditService.js';
+
+/** Audit module for a sale: the same keys as the tenant's sales modules. */
+const salesModule = (mode?: string) => (mode === 'WHOLESALE' ? 'wholesale_sales' : 'retail_sales');
+import { findOrCreateCreditCustomer, listCreditContacts } from '../services/creditCustomerService.js';
 
 /**
  * Mirrors `enum SalePaymentMethod` in schema.prisma. The frontend keeps the same
@@ -96,6 +101,7 @@ export async function createSale(req: AuthRequest, res: Response) {
       user.accountType === 'owner' ? 'OWNER' : 'EMPLOYEE';
     const sellerName = await resolvePersonName(user.id, sellerType);
 
+    let lowStock: LowStockEntry[] = [];
     const sale = await prisma.$transaction(async (tx: any) => {
       const saleNumber = await getNextSaleNumber(tenantId, tx);
 
@@ -120,6 +126,8 @@ export async function createSale(req: AuthRequest, res: Response) {
       // where the original "trust the client's unitPrice" gap actually lived,
       // and it stays fully closed here.
       const OFFLINE_PRICE_TOLERANCE = 0.2; // 20% — starting point, tune to the business
+
+      const unitCosts = await currentUnitCosts(tx, tenantId, items.map((item: any) => item.categoryId));
 
       let subtotal = 0;
       const saleItems: any[] = [];
@@ -171,6 +179,7 @@ export async function createSale(req: AuthRequest, res: Response) {
           serialNumber: item.unitIdentifier || null,
           variantId: item.variantId || null,
           variantLabel: resolved.variantLabel ?? null,
+          ...costFields(unitCosts, item.categoryId),
         });
       }
       // Parallel to saleItems — the unit each line asked for, kept separate
@@ -216,6 +225,8 @@ export async function createSale(req: AuthRequest, res: Response) {
         const credit = await findOrCreateCreditCustomer(tx, tenantId, {
           phone: String(creditContact.phone),
           name: customerName,
+          // The cashier's answer to "is this the same person?", when the till asked.
+          decision: creditContact.decision === 'new' ? 'new' : null,
         });
         effectiveCustomerId = credit.id;
         creditCustomerName = credit.name;
@@ -267,7 +278,7 @@ export async function createSale(req: AuthRequest, res: Response) {
 
       // The server checks stock at this moment rather than trusting whatever the
       // device last saw. Insufficient stock throws and rolls back the whole sale.
-      const { soldUnitIds } = await deductStockForSale(
+      const deducted = await deductStockForSale(
         tx,
         saleItems.map((i: any, idx: number) => ({
           categoryId: i.categoryId,
@@ -282,6 +293,8 @@ export async function createSale(req: AuthRequest, res: Response) {
         tenantId,
         user.id,
       );
+      const { soldUnitIds } = deducted;
+      lowStock = deducted.lowStock;
 
       // createdSale.items is in the same order the nested create was given.
       // Only lines that actually claimed a unit get a productItemId — a serial
@@ -314,6 +327,25 @@ export async function createSale(req: AuthRequest, res: Response) {
       maxWait: 10_000,
     });
 
+    void notifyLowStock(tenantId, lowStock, sale.saleNumber);
+
+    auditRequest(req, {
+      action: mode === 'WHOLESALE' ? 'WHOLESALE_SALE_RECORDED' : 'RETAIL_SALE_RECORDED',
+      module: salesModule(mode),
+      entityType: 'Sale',
+      entityId: sale.id,
+      entityLabel: `#${sale.saleNumber}${sale.customerName ? ` · ${sale.customerName}` : ''}`,
+      details: {
+        saleNumber: sale.saleNumber,
+        total: Number(sale.totalAmount),
+        paymentStatus: sale.paymentStatus,
+        amountOwed: Number(sale.amountOwed),
+        items: sale.items.map((i: any) => ({ product: i.productName, quantity: i.quantity, unitPrice: Number(i.unitPrice) })),
+        payments: (payments ?? []).map((p: any) => ({ method: p.method, amount: Number(p.amount) })),
+        customer: sale.customerName ?? null,
+      },
+    });
+
     return res.status(201).json({
       success: true,
       message: 'Sale created',
@@ -321,6 +353,13 @@ export async function createSale(req: AuthRequest, res: Response) {
     });
   } catch (error) {
     if (error instanceof InsufficientStockError) {
+      auditRequest(req, {
+        action: req.body?.mode === 'WHOLESALE' ? 'WHOLESALE_SALE_REFUSED' : 'RETAIL_SALE_REFUSED',
+        module: salesModule(req.body?.mode),
+        status: AuditStatus.FAILURE,
+        entityType: 'Sale',
+        details: { reason: 'Insufficient stock', items: error.items },
+      });
       return res.status(400).json({
         success: false,
         message: error.message,
@@ -466,106 +505,6 @@ function lookupSaleByCode(mode: 'RETAIL' | 'WHOLESALE') {
 export const lookupRetailSaleByCode = lookupSaleByCode('RETAIL');
 export const lookupWholesaleSaleByCode = lookupSaleByCode('WHOLESALE');
 
-export async function updateSale(req: AuthRequest, res: Response) {
-  try {
-    const tenantId = req.tenantId!;
-    const saleId = req.params.id;
-
-    const existing = await prisma.sale.findFirst({
-      where: { id: saleId, tenantId },
-      include: { items: true },
-    });
-    if (!existing) return res.status(404).json({ success: false, message: 'Sale not found' });
-
-    if (existing.status === 'CANCELLED' || existing.status === 'RETURNED') {
-      return res.status(400).json({ success: false, message: 'Cannot update a cancelled or returned sale' });
-    }
-
-    const {
-      customerName,
-      customerId,
-      notes,
-      discountType,
-      discountValue,
-      items,
-    } = req.body;
-
-    const updateData: any = {};
-    if (customerName !== undefined) updateData.customerName = customerName || null;
-    if (customerId !== undefined) updateData.customerId = customerId || null;
-    if (notes !== undefined) updateData.notes = notes || null;
-
-    if (items?.length) {
-      await prisma.saleItem.deleteMany({ where: { saleId } });
-
-      const effectiveCustomerId = customerId !== undefined ? (customerId || null) : existing.customerId;
-      const priceLines = items.map((item: any) => ({
-        categoryId: item.categoryId,
-        quantity: item.quantity,
-        variantId: item.variantId || null,
-      }));
-      // Always server-resolved: this is an explicit later edit, never an
-      // offline sync, so there is no already-happened sale to respect.
-      const resolvedPrices = await resolvePricesForSale(tenantId, effectiveCustomerId, priceLines);
-
-      const newItems = items.map((item: any, idx: number) => {
-        const resolved = resolvedPrices[idx];
-        const unitPrice = resolved.unitPrice;
-        const itemDiscount = item.discountType === 'PERCENTAGE'
-          ? (unitPrice * item.quantity * (item.discountValue || 0)) / 100
-          : (item.discountValue || 0);
-        const lineTotal = unitPrice * item.quantity - itemDiscount;
-        return {
-          saleId,
-          categoryId: item.categoryId,
-          productName: item.productName,
-          sku: item.sku || null,
-          unitPrice,
-          quantity: item.quantity,
-          discountType: item.discountType || null,
-          discountValue: item.discountValue || null,
-          discountAmount: itemDiscount,
-          lineTotal,
-          batchNumber: item.batchNumber || null,
-          lotNumber: item.lotNumber || null,
-          variantId: item.variantId || null,
-          variantLabel: resolved.variantLabel ?? null,
-        };
-      });
-
-      const subtotal = newItems.reduce((sum: number, i: any) => sum + i.lineTotal, 0);
-      await prisma.saleItem.createMany({ data: newItems });
-
-      const saleDiscountAmount = (discountType ?? existing.discountType) === 'PERCENTAGE'
-        ? (subtotal * ((discountValue ?? Number(existing.discountValue)) || 0)) / 100
-        : ((discountValue ?? Number(existing.discountValue)) || 0);
-      const totalAmount = subtotal - saleDiscountAmount;
-
-      updateData.subtotal = subtotal;
-      updateData.totalAmount = totalAmount;
-      updateData.discountAmount = saleDiscountAmount;
-      updateData.amountOwed = Math.max(0, totalAmount - Number(existing.amountPaid));
-      if (updateData.amountOwed <= 0) updateData.paymentStatus = 'PAID';
-      else if (Number(existing.amountPaid) > 0) updateData.paymentStatus = 'PARTIAL';
-      else updateData.paymentStatus = 'CREDIT';
-    }
-
-    if (discountType !== undefined) updateData.discountType = discountType || null;
-    if (discountValue !== undefined) updateData.discountValue = discountValue || null;
-
-    const updated = await prisma.sale.update({
-      where: { id: saleId },
-      data: updateData,
-      include: { items: true, payments: true, customer: true },
-    });
-
-    return res.json({ success: true, message: 'Sale updated', data: updated });
-  } catch (error) {
-    console.error('Error updating sale:', error);
-    return res.status(500).json({ success: false, message: 'Failed to update sale' });
-  }
-}
-
 export async function addPaymentToSale(req: AuthRequest, res: Response) {
   try {
     const tenantId = req.tenantId!;
@@ -618,6 +557,22 @@ export async function addPaymentToSale(req: AuthRequest, res: Response) {
       await recordSaleTipAsIncome(tx, sale as any, tipAmount, tenantId);
     });
 
+    auditRequest(req, {
+      action: sale.mode === 'WHOLESALE' ? 'WHOLESALE_SALE_PAYMENT_RECORDED' : 'RETAIL_SALE_PAYMENT_RECORDED',
+      module: salesModule(sale.mode),
+      entityType: 'Sale',
+      entityId: sale.id,
+      entityLabel: `#${sale.saleNumber}${sale.customerName ? ` · ${sale.customerName}` : ''}`,
+      details: {
+        method,
+        amount,
+        reference: reference || null,
+        stillOwed: Math.max(0, newAmountOwed),
+        paymentStatus: newStatus,
+        ...(tipAmount > 0 ? { tip: tipAmount } : {}),
+      },
+    });
+
     return res.json({
       success: true,
       message: 'Payment recorded',
@@ -668,6 +623,16 @@ export async function getCreditCustomersController(req: AuthRequest, res: Respon
     return res.json({ success: true, data });
   } catch (error) {
     return res.status(500).json({ success: false, message: 'Failed to get credit customers' });
+  }
+}
+
+/** Phones the till mirrors on-device, so it can ask before attaching a credit sale to someone. */
+export async function getCreditContactsController(req: AuthRequest, res: Response) {
+  try {
+    const data = await listCreditContacts(req.tenantId!);
+    return res.json({ success: true, data });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to get credit contacts' });
   }
 }
 

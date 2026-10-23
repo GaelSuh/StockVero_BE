@@ -98,6 +98,13 @@ model Tenant {
   financeBalance             TenantFinanceBalance?
   modules                    TenantModule[]
   approvedByAdmin            SuperAdmin?                 @relation("TenantApprovedBy", fields: [approvedBy], references: [id])
+  /// CUSTOMER by default; INTERNAL/DEMO/TEST tenants are excluded from insights by default.
+  tenantType                 TenantType                  @default(CUSTOMER) @map("tenant_type")
+  /// Digisol admin responsible for this account (optional).
+  accountOwnerId             String?                     @map("account_owner_id")
+  accountOwner               SuperAdmin?                 @relation("TenantAccountOwner", fields: [accountOwnerId], references: [id], onDelete: SetNull)
+  adminNotes                 TenantNote[]
+  followUps                  TenantFollowUp[]
   transactions               Transaction[]
   userPreferences            UserPreference[]
   users                      User[]
@@ -107,7 +114,10 @@ model Tenant {
   deliveryNotes              DeliveryNote[]
   dailySummaries             DailySummary[]
   saleSequence               SaleSequence?
+  dailyMetrics               TenantDailyMetric[]
+  dailyScores                TenantDailyScore[]
 
+  @@index([accountOwnerId])
   @@map("tenants")
 }
 
@@ -124,6 +134,8 @@ model User {
   isActive                Boolean   @default(true) @map("is_active")
   tokenVersion            Int       @default(0) @map("token_version")
   lastLoginAt             DateTime? @map("last_login_at")
+  /// Throttled (≤ once per 5 min) from tenantGuard; admin monitoring only.
+  lastSeenAt              DateTime? @map("last_seen_at")
   notificationPreferences Json?     @map("notification_preferences")
   createdAt               DateTime  @default(now()) @map("created_at")
   updatedAt               DateTime  @updatedAt @map("updated_at")
@@ -145,6 +157,11 @@ model SuperAdmin {
   updatedAt       DateTime         @updatedAt @map("updated_at")
   auditLogs       TenantAuditLog[]
   approvedTenants Tenant[]         @relation("TenantApprovedBy")
+  ownedTenants    Tenant[]         @relation("TenantAccountOwner")
+  tenantNotes     TenantNote[]
+  followUpsAssigned TenantFollowUp[] @relation("FollowUpAssignee")
+  followUpsCreated  TenantFollowUp[] @relation("FollowUpCreator")
+  activityLogs    AdminActivityLog[]
 
   @@map("super_admins")
 }
@@ -219,6 +236,8 @@ model Employee {
   mustChangePassword      Boolean             @default(true) @map("must_change_password")
   tokenVersion            Int                 @default(0) @map("token_version")
   lastLoginAt             DateTime?           @map("last_login_at")
+  /// Throttled (≤ once per 5 min) from tenantGuard; admin monitoring only.
+  lastSeenAt              DateTime?           @map("last_seen_at")
   notificationPreferences Json?               @map("notification_preferences")
   createdAt               DateTime            @default(now()) @map("created_at")
   updatedAt               DateTime            @updatedAt @map("updated_at")
@@ -427,6 +446,10 @@ model InventoryCategory {
   /// Live on-hand count for QUANTITY products. Distinct from plannedQty, which
   /// keeps its original meaning: the purchase quantity authorised on an invoice.
   quantityOnHand    Int                @default(0) @map("quantity_on_hand")
+  /// QUANTITY products only: units set aside as faulty (may be repaired) and
+  /// damaged (unusable). Never sellable; quantityOnHand counts sellable only.
+  quantityFaulty    Int                @default(0) @map("quantity_faulty")
+  quantityDamaged   Int                @default(0) @map("quantity_damaged")
   description       String?
   supplier          String?
   unit              String?
@@ -531,6 +554,9 @@ model ProductVariant {
   /// at it, read through getAvailableStock (lib/stock.ts) — the same
   /// division of responsibility the parent category already follows.
   quantityOnHand Int @default(0) @map("quantity_on_hand")
+  /// Same split as InventoryCategory.quantityFaulty / quantityDamaged.
+  quantityFaulty Int @default(0) @map("quantity_faulty")
+  quantityDamaged Int @default(0) @map("quantity_damaged")
 
   isActive  Boolean @default(true) @map("is_active")
   sortOrder Int     @default(0) @map("sort_order")
@@ -1493,6 +1519,15 @@ model SaleItem {
   /// deletion of the source variant.
   variantLabel String? @map("variant_label")
 
+  /// Cost of one unit at the moment it was sold, so a past sale's profit never
+  /// moves when the product's costPrice is edited later. Null only for lines
+  /// the backfill has not reached yet.
+  unitCost   Decimal? @map("unit_cost") @db.Decimal(15, 2)
+  /// Where unitCost came from: SALE (snapshotted when sold), PURCHASE_HISTORY
+  /// (backfilled from the purchases recorded before the sale) or CURRENT_PRICE
+  /// (backfilled from the product's cost price; the only estimated source).
+  costSource String?  @map("cost_source")
+
   createdAt DateTime @default(now()) @map("created_at")
 
   sale        Sale              @relation(fields: [saleId], references: [id], onDelete: Cascade)
@@ -1554,6 +1589,7 @@ model SaleReturn {
   @@unique([tenantId, returnNumber])
   @@index([tenantId])
   @@index([saleId])
+  @@index([tenantId, createdAt])
   @@map("sale_returns")
 }
 
@@ -1568,6 +1604,9 @@ model SaleReturnItem {
   /// product can't say which option it is — meaning a return would restock
   /// the wrong option once variants exist. Correctness fix, not optional.
   variantId   String? @map("variant_id")
+  /// What came back: GOOD (resold), FAULTY (set aside, may be repaired) or
+  /// DAMAGED (unusable). Decides where the returned stock goes.
+  condition   String  @default("GOOD")
 
   saleReturn SaleReturn      @relation(fields: [returnId], references: [id], onDelete: Cascade)
   variant    ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
@@ -1720,4 +1759,157 @@ model SaleSequence {
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@map("sale_sequences")
+}
+
+/// One row per tenant per Africa/Douala day. Additive numbers only (counts and sums);
+/// ratios/averages are derived at read time so days roll up into weeks/months correctly.
+/// Flow metrics are recomputable from history; point-in-time (catalogue) metrics are
+/// only known when captured by the nightly job and stay NULL for backfilled days.
+/// Values are in the tenant's currency (XAF everywhere today; no per-tenant currency exists).
+model TenantDailyMetric {
+  id       String   @id @default(uuid())
+  tenantId String   @map("tenant_id")
+  day      DateTime @db.Date
+
+  // Sales flow: status COMPLETED | PARTIAL | RETURNED, gross, on the day of the sale
+  salesCount          Int     @default(0) @map("sales_count")
+  salesValue          Decimal @default(0) @map("sales_value") @db.Decimal(14, 2)
+  retailSalesCount    Int     @default(0) @map("retail_sales_count")
+  retailSalesValue    Decimal @default(0) @map("retail_sales_value") @db.Decimal(14, 2)
+  wholesaleSalesCount Int     @default(0) @map("wholesale_sales_count")
+  wholesaleSalesValue Decimal @default(0) @map("wholesale_sales_value") @db.Decimal(14, 2)
+  // Returns flow, on the day of the return
+  returnsCount Int     @default(0) @map("returns_count")
+  returnsValue Decimal @default(0) @map("returns_value") @db.Decimal(14, 2)
+  // Usage flow
+  activeUsers Int @default(0) @map("active_users")
+  userActions Int @default(0) @map("user_actions")
+
+  // Catalogue at end of day (STOCK-type products); NULL when not captured
+  productCount           Int?     @map("product_count")
+  variantCount           Int?     @map("variant_count")
+  serializedUnitsInStock Int?     @map("serialized_units_in_stock")
+  quantityUnitsInStock   Int?     @map("quantity_units_in_stock")
+  stockValueAtCost       Decimal? @map("stock_value_at_cost") @db.Decimal(16, 2)
+  outOfStockCount        Int?     @map("out_of_stock_count")
+  lowStockCount          Int?     @map("low_stock_count")
+  deadStockCount         Int?     @map("dead_stock_count")
+
+  flowComputedAt         DateTime  @map("flow_computed_at")
+  pointInTimeCapturedAt  DateTime? @map("point_in_time_captured_at")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, day])
+  @@index([day])
+  @@map("tenant_daily_metrics")
+}
+
+/// One row per metrics job execution (nightly, backfill, admin rebuild).
+model MetricsJobRun {
+  id               String    @id @default(uuid())
+  kind             String // NIGHTLY | BACKFILL | REBUILD
+  fromDay          DateTime  @map("from_day") @db.Date
+  toDay            DateTime  @map("to_day") @db.Date
+  tenantId         String?   @map("tenant_id")
+  triggeredBy      String    @map("triggered_by")
+  status           String // RUNNING | SUCCESS | PARTIAL | FAILED
+  tenantsProcessed Int       @default(0) @map("tenants_processed")
+  tenantsFailed    Int       @default(0) @map("tenants_failed")
+  errors           Json?
+  startedAt        DateTime  @default(now()) @map("started_at")
+  finishedAt       DateTime? @map("finished_at")
+
+  @@index([kind, toDay])
+  @@index([startedAt])
+  @@map("metrics_job_runs")
+}
+
+/// Insights result per tenant per Douala day, written by the nightly job after the snapshots.
+/// History for "newly at risk" alerts and health trend charts. `result` is the full
+/// computeInsight() output (factors, flags, value components); the columns are for querying.
+model TenantDailyScore {
+  id         String   @id @default(uuid())
+  tenantId   String   @map("tenant_id")
+  day        DateTime @db.Date
+  /// SCORED | ONBOARDING | INSUFFICIENT_DATA | SUSPENDED | INACTIVE
+  state      String
+  score      Int?
+  /// HEALTHY | NEEDS_ATTENTION | AT_RISK (null when not scored)
+  band       String?
+  /// KEY_ACCOUNT | GROWTH | STANDARD
+  tier       String
+  valueScore Int      @map("value_score")
+  partial    Boolean  @default(false)
+  result     Json
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, day])
+  @@index([day, band])
+  @@map("tenant_daily_scores")
+}
+
+enum TenantType {
+  CUSTOMER
+  INTERNAL
+  DEMO
+  TEST
+}
+
+/// Timestamped admin notes on a tenant (replaces the single tenants.notes field, which is kept).
+model TenantNote {
+  id                 String      @id @default(uuid())
+  tenantId           String      @map("tenant_id")
+  /// Null for the note migrated from tenants.notes (it had no recorded author).
+  authorId           String?     @map("author_id")
+  body               String
+  migratedFromLegacy Boolean     @default(false) @map("migrated_from_legacy")
+  createdAt          DateTime    @default(now()) @map("created_at")
+  tenant             Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  author             SuperAdmin? @relation(fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, createdAt])
+  @@map("tenant_notes")
+}
+
+/// Admin follow-up tasks on a tenant.
+model TenantFollowUp {
+  id            String      @id @default(uuid())
+  tenantId      String      @map("tenant_id")
+  title         String
+  dueDay        DateTime    @map("due_day") @db.Date
+  assigneeId    String      @map("assignee_id")
+  createdById   String?     @map("created_by_id")
+  /// OPEN | DONE
+  status        String      @default("OPEN")
+  completedAt   DateTime?   @map("completed_at")
+  completedById String?     @map("completed_by_id")
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime    @updatedAt @map("updated_at")
+  tenant        Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assignee      SuperAdmin  @relation("FollowUpAssignee", fields: [assigneeId], references: [id])
+  createdBy     SuperAdmin? @relation("FollowUpCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([assigneeId, status, dueDay])
+  @@index([tenantId, status])
+  @@map("tenant_follow_ups")
+}
+
+/// Admin actions that are not about one tenant (e.g. insights CSV export). Tenant-scoped actions
+/// keep going to tenant_audit_logs, whose tenant_id is required.
+model AdminActivityLog {
+  id        String     @id @default(uuid())
+  adminId   String     @map("admin_id")
+  action    String
+  details   Json
+  createdAt DateTime   @default(now()) @map("created_at")
+  admin     SuperAdmin @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt])
+  @@map("admin_activity_logs")
 }

@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { AuthRequest } from '../types/index.js';
 import { prisma } from '../db.js';
-import { logAudit, AuditActorType } from '../services/auditService.js';
+import { logAudit, AuditActorType, auditRequest } from '../services/auditService.js';
 import { broadcastToModule } from '../services/notificationService.js';
 import { checkPriceListDependencies } from '../services/dependencyCheckService.js';
 
@@ -72,7 +72,7 @@ export async function createPriceList(req: AuthRequest, res: Response) {
       tenantId,
       actorType: actorTypeFromUser(req.user!),
       actorId: req.user!.id,
-      action: 'priceList.created',
+      action: 'PRICE_LIST_CREATED',
       module: PRICING_MODULE,
       entityType: 'PriceList',
       entityId: priceList.id,
@@ -169,7 +169,7 @@ export async function updatePriceList(req: AuthRequest, res: Response) {
       tenantId,
       actorType: actorTypeFromUser(req.user!),
       actorId: req.user!.id,
-      action: 'priceList.updated',
+      action: 'PRICE_LIST_UPDATED',
       module: PRICING_MODULE,
       entityType: 'PriceList',
       entityId: updated.id,
@@ -226,7 +226,7 @@ export async function deletePriceList(req: AuthRequest, res: Response) {
       tenantId: req.tenantId!,
       actorType: actorTypeFromUser(req.user!),
       actorId: req.user!.id,
-      action: 'priceList.deleted',
+      action: 'PRICE_LIST_DELETED',
       module: PRICING_MODULE,
       entityType: 'PriceList',
       entityId: existing.id,
@@ -260,6 +260,16 @@ export async function assignCustomerToPriceList(req: AuthRequest, res: Response)
       create: { customerId, priceListId: req.params.id },
     });
 
+    const customer = await prisma.customer.findFirst({ where: { id: customerId, tenantId: req.tenantId! }, select: { name: true } });
+    auditRequest(req, {
+      action: 'PRICE_LIST_CUSTOMER_ASSIGNED',
+      module: 'wholesale_sales',
+      entityType: 'PriceList',
+      entityId: existing.id,
+      entityLabel: existing.name,
+      details: { customerId, customer: customer?.name ?? null },
+    });
+
     return res.status(201).json({ success: true, message: 'Customer assigned', data: assignment });
   } catch (error) {
     return res.status(500).json({ success: false, message: 'Failed to assign customer' });
@@ -268,8 +278,21 @@ export async function assignCustomerToPriceList(req: AuthRequest, res: Response)
 
 export async function removeCustomerFromPriceList(req: AuthRequest, res: Response) {
   try {
+    // The price list must be this tenant's; without this check any known ids could be unlinked.
+    const list = await prisma.priceList.findFirst({ where: { id: req.params.id, tenantId: req.tenantId! } });
+    if (!list) return res.status(404).json({ success: false, message: 'Price list not found' });
+
     await prisma.customerPriceList.deleteMany({
       where: { customerId: req.params.customerId, priceListId: req.params.id },
+    });
+    const customer = await prisma.customer.findFirst({ where: { id: req.params.customerId, tenantId: req.tenantId! }, select: { name: true } });
+    auditRequest(req, {
+      action: 'PRICE_LIST_CUSTOMER_REMOVED',
+      module: 'wholesale_sales',
+      entityType: 'PriceList',
+      entityId: list.id,
+      entityLabel: list.name,
+      details: { customerId: req.params.customerId, customer: customer?.name ?? null },
     });
     return res.json({ success: true, message: 'Customer removed from price list' });
   } catch (error) {

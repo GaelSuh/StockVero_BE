@@ -3,7 +3,7 @@ import multer from 'multer';
 import { tenantGuard } from '../middleware/auth.js';
 import { prisma } from '../db.js';
 import { AuthRequest } from '../types/index.js';
-import { logAudit, extractRequestContext, AuditActorType } from '../services/auditService.js';
+import { logAudit, auditRequest, buildDiff, extractRequestContext, AuditActorType } from '../services/auditService.js';
 import { supabase, STORAGE_BUCKET } from '../lib/storage.js';
 const router = Router();
 router.use(tenantGuard);
@@ -197,6 +197,19 @@ router.patch('/:id', async (req: AuthRequest, res: Response) => {
     data: {
       docType: docType !== undefined ? (docType.trim() || null) : undefined,
       description: description !== undefined ? (description.trim() || null) : undefined,
+    },
+  });
+
+  auditRequest(req, {
+    action: 'DOCUMENT_UPDATED',
+    module: doc.sourceModule,
+    entityType: 'Document',
+    entityId: doc.id,
+    entityLabel: doc.name,
+    details: {
+      sourceModule: doc.sourceModule,
+      sourceId: doc.sourceId,
+      ...buildDiff({ docType: doc.docType, description: doc.description }, { docType: updated.docType, description: updated.description }),
     },
   });
 

@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { AuthRequest } from '../types/index.js';
 import { prisma } from '../db.js';
 import { getNextDeliveryNoteNumber } from '../services/saleService.js';
+import { auditRequest } from '../services/auditService.js';
 
 export async function createDeliveryNote(req: AuthRequest, res: Response) {
   try {
@@ -34,6 +35,15 @@ export async function createDeliveryNote(req: AuthRequest, res: Response) {
         },
       },
       include: { items: true },
+    });
+
+    auditRequest(req, {
+      action: 'DELIVERY_NOTE_CREATED',
+      module: 'wholesale_sales',
+      entityType: 'Sale',
+      entityId: saleId,
+      entityLabel: `#${sale.saleNumber} · ${noteNumber}`,
+      details: { noteNumber, driverName: driverName || null, vehicleInfo: vehicleInfo || null, lines: items.length },
     });
 
     return res.status(201).json({ success: true, message: 'Delivery note created', data: deliveryNote });
@@ -113,8 +123,9 @@ export async function updateDeliveryNoteStatus(req: AuthRequest, res: Response) 
 
     if (items?.length && (status === 'DELIVERED' || status === 'PARTIAL_DELIVERY')) {
       for (const item of items) {
-        await prisma.deliveryNoteItem.update({
-          where: { id: item.id },
+        // Scoped to this note, so an item id from another tenant's note cannot be written.
+        await prisma.deliveryNoteItem.updateMany({
+          where: { id: item.id, deliveryNoteId: existing.id },
           data: { quantityReceived: item.quantityReceived },
         });
       }
@@ -126,6 +137,19 @@ export async function updateDeliveryNoteStatus(req: AuthRequest, res: Response) 
         data: { deliveryStatus: 'DELIVERED' },
       });
     }
+
+    auditRequest(req, {
+      action: 'DELIVERY_STATUS_CHANGED',
+      module: 'wholesale_sales',
+      entityType: 'Sale',
+      entityId: existing.saleId,
+      entityLabel: existing.noteNumber,
+      details: {
+        before: { status: existing.status },
+        after: { status },
+        ...(items?.length ? { received: items.map((i: any) => ({ item: i.id, quantityReceived: i.quantityReceived })) } : {}),
+      },
+    });
 
     return res.json({ success: true, message: 'Delivery note updated', data: updated });
   } catch (error) {

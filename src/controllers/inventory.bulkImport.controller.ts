@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { prisma } from '../db.js';
 import { AuthRequest } from '../types/index.js';
 import { broadcastToModule } from '../services/notificationService.js';
-import { logAudit, extractRequestContext, AuditActorType } from '../services/auditService.js';
+import { logAudit, auditRequest, extractRequestContext, AuditActorType } from '../services/auditService.js';
 import { addQuantityStock } from '../services/quantityStockService.js';
 import { InsufficientFundsError } from '../services/balanceService.js';
 import { stockApprovalRequired } from '../lib/tenantSettings.js';
@@ -203,6 +203,14 @@ export const createProductCategory = async (req: AuthRequest, res: Response) => 
 
     const category = await (prisma as any).productCategory.create({
       data: { tenantId, name, normalizedName },
+    });
+
+    auditRequest(req, {
+      action: 'PRODUCT_CATEGORY_CREATED',
+      module: 'inventory',
+      entityType: 'ProductCategory',
+      entityId: category.id,
+      entityLabel: category.name,
     });
 
     return res.status(201).json({
