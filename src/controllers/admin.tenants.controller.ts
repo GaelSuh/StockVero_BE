@@ -19,7 +19,7 @@ import {
 } from '../lib/pricing.js';
 import { getPeriodEnd, toDecimal } from '../services/billing.service.js';
 import { addDays } from '../lib/dates.js';
-import { sendEmail } from '../services/emailService.js';
+import { sendEmail, APP_URL } from '../services/emailService.js';
 import { tenantApproved as tenantApprovedEmail, tenantDenied as tenantDeniedEmail, tenantSuspended as tenantSuspendedEmail } from '../emails/templates.js';
 
 const CreateTenantSchema = z.object({
@@ -697,7 +697,6 @@ export const approveTenant = async (req: AdminRequest, res: Response) => {
 
     await logAuditAction(req.admin!.id, tenant.id, 'TENANT_APPROVED', {});
 
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
     const owner = tenant.users[0];
     if (owner) {
       void sendEmail({
@@ -706,7 +705,7 @@ export const approveTenant = async (req: AdminRequest, res: Response) => {
         html: tenantApprovedEmail({
           ownerName: `${owner.firstName} ${owner.lastName}`,
           orgName: tenant.name,
-          loginUrl: frontendUrl,
+          loginUrl: `${APP_URL}/login`,
         }),
       });
       // TODO: In production, verify EMAIL_FROM domain in Resend dashboard

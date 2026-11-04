@@ -4,6 +4,9 @@ import nodemailer from 'nodemailer';
 const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 const RESEND_FROM = process.env.RESEND_FROM || 'StockVero <onboarding@resend.dev>';
 
+/** Base of every link in an email. Never localhost: emails are read outside this machine. */
+export const APP_URL = (process.env.FRONTEND_URL || 'https://stockvero.com').replace(/\/+$/, '');
+
 const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
 const transporter = process.env.EMAIL_HOST

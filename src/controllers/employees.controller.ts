@@ -4,7 +4,7 @@ import bcrypt from 'bcrypt';
 import { prisma } from '../db.js';
 import { AuthRequest } from '../types/index.js';
 import { sendNotification, broadcastToModule } from '../services/notificationService.js';
-import { sendEmail } from '../services/emailService.js';
+import { sendEmail, APP_URL } from '../services/emailService.js';
 import { employeeWelcome, employeePasswordReset } from '../emails/templates.js';
 import { logAudit, auditRequest, extractRequestContext, buildDiff, AuditActorType } from '../services/auditService.js';
 import { resolveSignedUrl, deleteStoredFile } from '../lib/storage.js';
@@ -282,7 +282,6 @@ export const createEmployee = async (req: AuthRequest, res: Response) => {
       link: '/change-password',
     }).catch(() => {});
 
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
     void sendEmail({
       to: employee.email,
       subject: 'Your StockVero employee account is ready',
@@ -291,7 +290,7 @@ export const createEmployee = async (req: AuthRequest, res: Response) => {
         orgName: tenant?.name || 'your organization',
         email: employee.email,
         temporaryPassword,
-        loginUrl: frontendUrl,
+        loginUrl: `${APP_URL}/login`,
       }),
     });
     // TODO: In production, verify EMAIL_FROM domain in Resend dashboard
