@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { prisma } from '../db.js';
 import { AuthRequest } from '../types/index.js';
+import { humanizeAuditDetails } from '../services/auditReadable.js';
 
 // GET /api/v1/audit
 export const listAuditLogs = async (req: AuthRequest, res: Response) => {
@@ -51,7 +52,7 @@ export const listAuditLogs = async (req: AuthRequest, res: Response) => {
 
     return res.json({
       success: true,
-      data: logs,
+      data: await humanizeAuditDetails(tenantId, logs),
       meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
     });
   } catch (error) {

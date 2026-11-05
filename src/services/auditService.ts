@@ -27,7 +27,7 @@ export async function logAudit(params: AuditParams): Promise<void> {
     // audit log never shows "Unknown" for a real person.
     let actorName = params.actorName;
     if (!actorName && params.actorId) {
-      actorName = await resolveActorNameFromDb(params.actorType, params.actorId);
+      actorName = (await resolveActorNameFromDb(params.actorType, params.actorId)) ?? undefined;
     }
     if (!actorName) {
       actorName = resolveActorNameFallback(params.actorType);
@@ -83,6 +83,53 @@ function resolveActorNameFallback(type: AuditActorType): string {
   return 'Unknown';
 }
 
+type RequestLike = Request & {
+  tenantId?: string;
+  user?: { id?: string; accountType?: string };
+};
+
+/**
+ * logAudit for a request made by a signed-in owner or employee: tenant, actor,
+ * IP and device come from the request, so a call site only says what happened.
+ *
+ * Work queued on a device while offline arrives later with an `offlineId` and
+ * the device time it happened (`recordedAt`); both are kept in `details`, so
+ * the log shows when it really happened and when it reached the server.
+ */
+export function auditRequest(
+  req: RequestLike,
+  entry: Omit<AuditParams, 'tenantId' | 'actorType' | 'actorId' | 'ipAddress' | 'userAgent'> & { tenantId?: string },
+): void {
+  const tenantId = entry.tenantId ?? req.tenantId;
+  if (!tenantId) return;
+  const body = (req.body ?? {}) as { offlineId?: unknown; recordedAt?: unknown };
+  const recordedAt = typeof body.recordedAt === 'number' || typeof body.recordedAt === 'string' ? new Date(body.recordedAt) : null;
+  const offline = typeof body.offlineId === 'string' && body.offlineId
+    ? {
+        offline: true,
+        offlineId: body.offlineId,
+        ...(recordedAt && !Number.isNaN(recordedAt.getTime()) ? { recordedOfflineAt: recordedAt.toISOString() } : {}),
+        syncedAt: new Date().toISOString(),
+      }
+    : {};
+  const accountType = req.user?.accountType;
+  // Anyone who is neither the owner nor an employee (e.g. a platform admin acting
+  // on a tenant) is not one of the tenant's people, so is not labelled as one.
+  const actorType =
+    accountType === 'owner' ? AuditActorType.OWNER
+    : accountType === 'employee' ? AuditActorType.EMPLOYEE
+    : AuditActorType.SYSTEM;
+  void logAudit({
+    ...entry,
+    tenantId,
+    actorType,
+    actorId: req.user?.id,
+    ...(actorType === AuditActorType.SYSTEM && !entry.actorName ? { actorName: 'Platform administrator' } : {}),
+    details: { ...(entry.details ?? {}), ...offline },
+    ...extractRequestContext(req),
+  });
+}
+
 /** Extract IP address and user agent from an Express request */
 export function extractRequestContext(req: Request): { ipAddress?: string; userAgent?: string } {
   const forwarded = req.headers['x-forwarded-for'];
@@ -107,20 +154,49 @@ export function buildDiff(
     before: {},
     after: {},
   };
-  const allKeys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  const allKeys = new Set([...Object.keys(before ?? {}), ...Object.keys(after ?? {})]);
   for (const key of allKeys) {
-    if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) {
-      changed.before[key] = before[key];
-      changed.after[key] = after[key];
+    if (isTechnicalField(key)) continue;
+    const b = auditValue(before?.[key]);
+    const a = auditValue(after?.[key]);
+    // A related record that was only loaded on one side is not a change.
+    if (b === undefined || a === undefined) {
+      if (isRelation(before?.[key]) || isRelation(after?.[key])) continue;
+    }
+    if (JSON.stringify(b) !== JSON.stringify(a)) {
+      changed.before[key] = b ?? null;
+      changed.after[key] = a ?? null;
     }
   }
-  // Strip sensitive fields
-  const sensitive = ['passwordHash', 'password', 'otpHash'];
-  for (const field of sensitive) {
-    delete changed.before[field];
-    delete changed.after[field];
-  }
   return changed;
+}
+
+/**
+ * Fields a person reading the audit log has no use for: identifiers, tenant,
+ * bookkeeping timestamps, counters and secrets. The record itself is already
+ * named by entityLabel.
+ */
+const TECHNICAL_FIELDS = new Set([
+  'id', 'tenantId', 'createdAt', 'updatedAt', 'deletedAt', '_count', 'normalizedName',
+  'passwordHash', 'password', 'otpHash', 'pinHash', 'offlineId', 'syncedAt',
+]);
+const isTechnicalField = (key: string) => TECHNICAL_FIELDS.has(key) || /Id$|Ids$/.test(key);
+
+const isRelation = (v: unknown) => !!v && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Date) && !isDecimal(v);
+const isDecimal = (v: any) => v && typeof v === 'object' && typeof v.toNumber === 'function';
+
+/** Plain value for the log: decimals as numbers, related records by name. */
+function auditValue(v: any): any {
+  if (v === undefined) return undefined;
+  if (v === null) return null;
+  if (isDecimal(v)) return v.toNumber();
+  if (v instanceof Date) return v.toISOString();
+  if (Array.isArray(v)) return v.map(auditValue);
+  if (typeof v === 'object') {
+    const label = v.name ?? v.label ?? v.title ?? [v.firstName, v.lastName].filter(Boolean).join(' ');
+    return label || undefined;
+  }
+  return v;
 }
 
 /** Resolve actor name from a user or employee object */

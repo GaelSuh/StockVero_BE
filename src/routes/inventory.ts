@@ -1,14 +1,15 @@
 import { Router, Response } from 'express';
 import crypto from 'crypto';
 import { z } from 'zod';
-import { createClient } from '@supabase/supabase-js';
 import { tenantGuard, moduleGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
 import { prisma } from '../db.js';
-import { STORAGE_BUCKET } from '../lib/storage.js';
+import { STORAGE_BUCKET, supabase } from '../lib/storage.js';
 import { AuthRequest } from '../types/index.js';
 import { checkInventoryCategoryDependencies, checkProductItemDependencies } from '../services/dependencyCheckService.js';
 import { broadcastToModule } from '../services/notificationService.js';
+import { auditRequest, buildDiff } from '../services/auditService.js';
 import { createMovement } from '../controllers/inventory.controller.js';
+import { changeStockCondition, getStockCondition } from '../controllers/inventory.condition.controller.js';
 import {
   createVariant,
   generateVariants,
@@ -71,10 +72,7 @@ const RestockSchema = z.object({
   note: z.string().optional(),
 });
 
-const supabaseUrl = process.env.SUPABASE_URL || '';
-const supabaseKey = process.env.SUPABASE_KEY || '';
 const bucket = STORAGE_BUCKET;
-const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 
 const parseItemMeta = (description?: string | null) => {
   if (!description) {
@@ -111,7 +109,7 @@ const resolveSignedUrl = async (url: string) => {
   if (!supabase) return url;
   try {
     const parsed = new URL(url);
-    const supabaseOrigin = new URL(supabaseUrl).origin;
+    const supabaseOrigin = new URL(process.env.SUPABASE_URL ?? '').origin;
     const publicPrefix = `/storage/v1/object/public/${bucket}/`;
     const signedPrefix = `/storage/v1/object/sign/${bucket}/`;
 
@@ -405,6 +403,15 @@ router.post('/products', permissionGuard('inventory', 'canCreate'), async (req, 
 
     // Finance tracking handled via invoiceService for serialised items
 
+    auditRequest(req, {
+      action: 'INVENTORY_ITEM_CREATED',
+      module: 'inventory',
+      entityType: 'InventoryItem',
+      entityId: item.id,
+      entityLabel: item.name,
+      details: { sku: item.sku, category: categoryName, stock: item.quantity, price: data.price },
+    });
+
     const responseImages = await resolveImageUrls(images);
     return res.status(201).json({
       success: true,
@@ -490,6 +497,15 @@ router.patch('/products/:id/restock', permissionGuard('inventory', 'canUpdate'),
     const responseImages = await resolveImageUrls(meta.images || []);
 
     // Finance tracking handled via invoiceService for serialised items
+
+    auditRequest(req, {
+      action: 'INVENTORY_ITEM_RESTOCKED',
+      module: 'inventory',
+      entityType: 'InventoryItem',
+      entityId: updated.id,
+      entityLabel: updated.name,
+      details: { sku: updated.sku, quantityAdded: quantity, stockBefore, stockAfter, unitCost: resolvedUnitCost, note: note ?? null },
+    });
 
     return res.json({
       success: true,
@@ -611,6 +627,18 @@ router.patch('/products/:id', permissionGuard('inventory', 'canUpdate'), async (
       }
     }
 
+    auditRequest(req, {
+      action: 'INVENTORY_ITEM_UPDATED',
+      module: 'inventory',
+      entityType: 'InventoryItem',
+      entityId: updated.id,
+      entityLabel: updated.name,
+      details: buildDiff(
+        { name: existing.name, category: existing.category, quantity: existing.quantity, unitCost: Number(existing.unitCost), lowStockAt: existing.lowStockAt, supplier: currentMeta.supplier ?? null, notes: currentMeta.notes ?? null },
+        { name: updated.name, category: updated.category, quantity: updated.quantity, unitCost: Number(updated.unitCost), lowStockAt: updated.lowStockAt, supplier: nextSupplier ?? null, notes: nextNotes ?? null },
+      ),
+    });
+
     const responseImages = await resolveImageUrls(nextImages || []);
     return res.json({
       success: true,
@@ -671,6 +699,15 @@ router.delete('/products/:id', permissionGuard('inventory', 'canDelete'), async 
     }
 
     await prisma.inventoryItem.delete({ where: { id: item.id } });
+
+    auditRequest(req, {
+      action: 'INVENTORY_ITEM_DELETED',
+      module: 'inventory',
+      entityType: 'InventoryItem',
+      entityId: item.id,
+      entityLabel: item.name,
+      details: { sku: item.sku, category: item.category, quantity: item.quantity, unitCost: Number(item.unitCost) },
+    });
 
     return res.json({
       success: true,
@@ -959,6 +996,8 @@ router.delete('/categories/:id', permissionGuard('inventory', 'canDelete'), asyn
  */
 router.get('/categories/:id/availability', permissionGuard('inventory', 'canRead'), checkCategoryAvailability);
 router.post('/categories/:id/restock-request', permissionGuard('inventory', 'canCreate'), restockRequest);
+router.get('/categories/:id/condition', permissionGuard('inventory', 'canRead'), getStockCondition);
+router.post('/categories/:id/condition', permissionGuard('inventory', 'canUpdate'), changeStockCondition);
 
 // ── Product variants ───────────────────────────────────────────────────────────
 //

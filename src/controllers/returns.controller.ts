@@ -3,6 +3,7 @@ import { AuthRequest } from '../types/index.js';
 import { processReturn, ReturnValidationError } from '../services/returnService.js';
 import { InsufficientStockError } from '../services/saleInventoryService.js';
 import { prisma } from '../db.js';
+import { auditRequest } from '../services/auditService.js';
 
 export async function createReturn(req: AuthRequest, res: Response) {
   try {
@@ -39,6 +40,25 @@ export async function createReturn(req: AuthRequest, res: Response) {
     });
 
     const skipped = (result as any).stockRestorationSkipped as Array<{ productName: string }> | undefined;
+
+    const original = await prisma.sale.findFirst({ where: { id: saleId, tenantId }, select: { saleNumber: true, mode: true } });
+    const r = result as any;
+    auditRequest(req, {
+      action: returnType === 'EXCHANGE' ? 'SALE_EXCHANGE_RECORDED' : 'SALE_RETURN_RECORDED',
+      module: original?.mode === 'WHOLESALE' ? 'wholesale_sales' : 'retail_sales',
+      entityType: 'Sale',
+      entityId: saleId,
+      entityLabel: `#${original?.saleNumber ?? ''}${r?.returnNumber ? ` · return ${r.returnNumber}` : ''}`,
+      details: {
+        reason,
+        returnType,
+        refundMethod: refundMethod ?? null,
+        refundAmount: r?.refundAmount !== undefined ? Number(r.refundAmount) : undefined,
+        items: (items ?? []).map((i: any) => ({ product: i.productName, quantity: i.quantity, condition: i.condition ?? "GOOD" })),
+        ...(returnType === 'EXCHANGE' ? { exchangeItems: (exchangeItems ?? []).map((i: any) => ({ product: i.productName, quantity: i.quantity })) } : {}),
+      },
+    });
+
     return res.status(201).json({
       success: true,
       message: 'Return processed',

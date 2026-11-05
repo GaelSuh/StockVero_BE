@@ -432,6 +432,9 @@ const formatCategory = (cat: any, stats: CategoryStats) => {
     notes: cat.notes,
     stockTrackingMode: cat.stockTrackingMode ?? 'SERIALIZED',
     quantityOnHand: cat.quantityOnHand ?? 0,
+    // Set aside, never sellable (QUANTITY products; serialized units carry it as their status).
+    quantityFaulty: cat.quantityFaulty ?? 0,
+    quantityDamaged: cat.quantityDamaged ?? 0,
     /**
      * How many variants this product has. The offline catalogue turns this
      * into CachedProduct.hasVariants, which is what lets the till know a

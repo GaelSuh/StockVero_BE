@@ -1,7 +1,9 @@
 import { prisma } from '../db.js';
-import { deductStockForSale, restoreStockForReturn } from './saleInventoryService.js';
+import { deductStockForSale, restoreStockForReturn, notifyLowStock, type LowStockEntry } from './saleInventoryService.js';
 import { getNextReturnNumber, getNextSaleNumber } from './saleService.js';
 import { recordReturnAsExpense, recordSaleAsIncome } from './saleFinanceService.js';
+import { costFields, currentUnitCosts } from './saleCostService.js';
+import { parseCondition } from './stockConditionService.js';
 
 type PrismaWriteClient =
   | typeof prisma
@@ -18,6 +20,8 @@ interface ReturnItemInput {
    * sale line — never guessed here. Null means the product has no variants.
    */
   variantId?: string | null;
+  /** What came back: GOOD (default), FAULTY or DAMAGED. Ignored for exchange goods going out. */
+  condition?: string | null;
 }
 
 /**
@@ -65,7 +69,9 @@ export async function processReturn(
     processedByName: string;
   },
 ) {
-  return prisma.$transaction(
+  // Exchange goods leave stock; their low-stock alert goes out only once committed.
+  const lowStockAlerts: { entries: LowStockEntry[]; saleNumber: string }[] = [];
+  const result = await prisma.$transaction(
     async (tx: PrismaWriteClient) => {
       const sale = await (tx as any).sale.findFirst({
         where: { id: saleId, tenantId },
@@ -156,6 +162,7 @@ export async function processReturn(
 
         const replacementNumber = await getNextSaleNumber(tenantId, tx);
         const difference = exchangeTotal - refundAmount;
+        const unitCosts = await currentUnitCosts(tx, tenantId, outgoing.map((i) => i.categoryId));
 
         const replacement = await (tx as any).sale.create({
           data: {
@@ -191,6 +198,7 @@ export async function processReturn(
                 // which option went out — otherwise returning the replacement
                 // later hits the same ambiguity this pass just closed.
                 variantId: (i as any).variantId ?? null,
+                ...costFields(unitCosts, i.categoryId),
               })),
             },
             // Only the difference is fresh money; the rest is paid for by the
@@ -215,7 +223,7 @@ export async function processReturn(
 
         exchangeSaleId = replacement.id;
 
-        await deductStockForSale(
+        const deducted = await deductStockForSale(
           tx,
           outgoing.map((i) => ({
             categoryId: i.categoryId,
@@ -230,6 +238,7 @@ export async function processReturn(
           tenantId,
           input.processedById,
         );
+        lowStockAlerts.push({ entries: deducted.lowStock, saleNumber: replacementNumber });
 
         // An exchange really is a sale, so it books its full value as income and
         // the goods coming back book their full value as an expense. The two net
@@ -260,6 +269,7 @@ export async function processReturn(
               // which option came back, rather than it being guessed from the
               // sale's first matching line.
               variantId: item.variantId ?? null,
+              condition: parseCondition(item.condition),
             })),
           },
         },
@@ -301,7 +311,7 @@ export async function processReturn(
         // Restock has to land on the same variant the sale took it from —
         // for a QUANTITY product that means the variant's own counter, not
         // the parent category's.
-        return { ...item, unitIds, variantId: item.variantId ?? null };
+        return { ...item, unitIds, variantId: item.variantId ?? null, condition: parseCondition(item.condition) };
       });
 
       const restoreResult = await restoreStockForReturn(
@@ -380,4 +390,6 @@ export async function processReturn(
     // work than the 5s default allows against a database in another region.
     { timeout: 30_000, maxWait: 10_000 },
   );
+  for (const alert of lowStockAlerts) void notifyLowStock(tenantId, alert.entries, alert.saleNumber);
+  return result;
 }

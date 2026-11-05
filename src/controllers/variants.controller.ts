@@ -215,12 +215,12 @@ export const createVariant = async (req: AuthRequest, res: Response) => {
       tenantId,
       actorType: actorTypeFromUser(user),
       actorId: user.id,
-      action: 'variant.created',
+      action: 'VARIANT_CREATED',
       module: 'inventory',
       entityType: 'ProductVariant',
       entityId: variant.id,
       entityLabel: variant.label,
-      details: { categoryId, categoryName: category.name, attributes, sku },
+      details: { product: category.name, attributes, sku },
     });
     await broadcastToModule(tenantId, 'inventory', {
       type: 'variant.created',
@@ -392,7 +392,7 @@ export const generateVariants = async (req: AuthRequest, res: Response) => {
       tenantId,
       actorType: actorTypeFromUser(user),
       actorId: user.id,
-      action: 'variant.generated',
+      action: 'VARIANTS_GENERATED',
       module: 'inventory',
       entityType: 'InventoryCategory',
       entityId: categoryId,
@@ -524,18 +524,17 @@ export const assignUnitsToVariant = async (req: AuthRequest, res: Response) => {
       tenantId,
       actorType: actorTypeFromUser(user),
       actorId: user.id,
-      action: 'variant.unitsAssigned',
+      action: 'VARIANT_UNITS_ASSIGNED',
       module: 'inventory',
       entityType: 'ProductVariant',
       entityId: variant.id,
       entityLabel: variant.label,
       // One summary of the batch, not one entry per unit.
       details: {
-        categoryId: category.id,
-        categoryName: category.name,
+        product: category.name,
         assigned: result.assigned,
         rejected: result.rejected,
-        unitIds,
+        unitsRequested: unitIds.length,
       },
     });
 
@@ -674,7 +673,7 @@ export const updateVariant = async (req: AuthRequest, res: Response) => {
       tenantId,
       actorType: actorTypeFromUser(user),
       actorId: user.id,
-      action: 'variant.updated',
+      action: 'VARIANT_UPDATED',
       module: 'inventory',
       entityType: 'ProductVariant',
       entityId: updated.id,
@@ -783,16 +782,17 @@ export const deleteVariant = async (req: AuthRequest, res: Response) => {
 
     await prisma.productVariant.delete({ where: { id: variant.id } });
 
+    const parent = await prisma.inventoryCategory.findUnique({ where: { id: variant.categoryId }, select: { name: true } });
     await logAudit({
       tenantId,
       actorType: actorTypeFromUser(user),
       actorId: user.id,
-      action: 'variant.deleted',
+      action: 'VARIANT_DELETED',
       module: 'inventory',
       entityType: 'ProductVariant',
       entityId: variant.id,
-      entityLabel: variant.label,
-      details: { categoryId: variant.categoryId, sku: variant.sku },
+      entityLabel: parent?.name ? `${parent.name} · ${variant.label}` : variant.label,
+      details: { product: parent?.name ?? null, variant: variant.label, sku: variant.sku },
     });
     await broadcastToModule(tenantId, 'inventory', {
       type: 'variant.deleted',

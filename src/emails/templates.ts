@@ -83,7 +83,7 @@ export function tenantRegistrationReceived(params: { ownerName: string; orgName:
   return baseTemplate('We received your registration — StockVero', body);
 }
 
-export function tenantApproved(params: { ownerName: string; orgName: string; loginUrl: string }): string {
+export function tenantApproved(params: { ownerName: string; orgName: string; loginUrl?: string }): string {
   const { ownerName, orgName, loginUrl } = params;
   const body = `Hi ${ownerName}, great news — your account for ${orgName} has been approved. You can now log in and start using the platform.`;
   return baseTemplate('Your StockVero account has been approved', body, loginUrl, 'Log In Now');
@@ -101,7 +101,7 @@ export function tenantSuspended(params: { ownerName: string; orgName: string; re
   return baseTemplate('Your StockVero account has been suspended', body);
 }
 
-export function employeeWelcome(params: { employeeName: string; orgName: string; email: string; temporaryPassword: string; loginUrl: string }): string {
+export function employeeWelcome(params: { employeeName: string; orgName: string; email: string; temporaryPassword: string; loginUrl?: string }): string {
   const { employeeName, orgName, email, temporaryPassword, loginUrl } = params;
   const body = `Hi ${employeeName}, your account for ${orgName} has been created. Here are your login details: Email: ${email}, Temporary Password: ${temporaryPassword}. You will be asked to change your password on first login.${monospaceBox(temporaryPassword)}`;
   return baseTemplate('Your StockVero employee account is ready', body, loginUrl, 'Log In Now');

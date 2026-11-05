@@ -4,9 +4,9 @@ import bcrypt from 'bcrypt';
 import { prisma } from '../db.js';
 import { AuthRequest } from '../types/index.js';
 import { sendNotification, broadcastToModule } from '../services/notificationService.js';
-import { sendEmail } from '../services/emailService.js';
+import { sendEmail, appLink } from '../services/emailService.js';
 import { employeeWelcome, employeePasswordReset } from '../emails/templates.js';
-import { logAudit, extractRequestContext, buildDiff, AuditActorType } from '../services/auditService.js';
+import { logAudit, auditRequest, extractRequestContext, buildDiff, AuditActorType } from '../services/auditService.js';
 import { resolveSignedUrl, deleteStoredFile } from '../lib/storage.js';
 
 const CreateEmployeeSchema = z.object({
@@ -282,7 +282,6 @@ export const createEmployee = async (req: AuthRequest, res: Response) => {
       link: '/change-password',
     }).catch(() => {});
 
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
     void sendEmail({
       to: employee.email,
       subject: 'Your StockVero employee account is ready',
@@ -291,7 +290,7 @@ export const createEmployee = async (req: AuthRequest, res: Response) => {
         orgName: tenant?.name || 'your organization',
         email: employee.email,
         temporaryPassword,
-        loginUrl: frontendUrl,
+        loginUrl: appLink('/login'),
       }),
     });
     // TODO: In production, verify EMAIL_FROM domain in Resend dashboard
@@ -489,6 +488,10 @@ export const updateEmployeeRole = async (req: AuthRequest, res: Response) => {
       });
     }
 
+    const previousRole = employee.roleId
+      ? await prisma.role.findUnique({ where: { id: employee.roleId }, select: { name: true } })
+      : null;
+
     const updatedEmployee = await prisma.employee.update({
       where: { id: req.params.id },
       data: { roleId: parsed.data.roleId },
@@ -517,6 +520,15 @@ export const updateEmployeeRole = async (req: AuthRequest, res: Response) => {
       title: 'Employee Role Changed',
       message: `${updatedEmployee.firstName}'s role has been updated to ${role.name}.`,
       link: `/admin/employees/${updatedEmployee.id}`,
+    });
+
+    auditRequest(req, {
+      action: 'EMPLOYEE_ROLE_CHANGED',
+      module: 'administration',
+      entityType: 'Employee',
+      entityId: updatedEmployee.id,
+      entityLabel: `${updatedEmployee.firstName} ${updatedEmployee.lastName}`,
+      details: buildDiff({ role: previousRole?.name ?? null }, { role: role.name }),
     });
 
     return res.json({

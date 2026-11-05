@@ -2,7 +2,7 @@ import { Response } from 'express';
 import { z } from 'zod';
 import { prisma } from '../db.js';
 import { AuthRequest } from '../types/index.js';
-import { broadcastToModule, sendNotification } from '../services/notificationService.js';
+import { broadcastToModule } from '../services/notificationService.js';
 import { logAudit, extractRequestContext, AuditActorType } from '../services/auditService.js';
 
 const ItemSchema = z.object({
@@ -426,22 +426,13 @@ export async function checkAndNotifyLowStock(
   try {
     if (currentStock > lowStockAt) return;
 
-    const owners = await prisma.user.findMany({
-      where: { tenantId, role: 'CLIENT_OWNER' },
-      select: { id: true },
+    // Owners and every employee whose role can read Inventory.
+    await broadcastToModule(tenantId, 'inventory', {
+      type: 'inventory.low_stock',
+      title: 'Low Stock Alert',
+      message: `${productName} is running low. Only ${currentStock} units remaining.`,
+      link: `/inventory/details/${productId}`,
     });
-
-    for (const owner of owners) {
-      await sendNotification({
-        tenantId,
-        userId: owner.id,
-        userType: 'OWNER',
-        type: 'inventory.low_stock',
-        title: 'Low Stock Alert',
-        message: `${productName} is running low. Only ${currentStock} units remaining.`,
-        link: `/inventory/details/${productId}`,
-      });
-    }
   } catch (error) {
     console.error('[inventory] Error sending low stock notification:', error);
   }

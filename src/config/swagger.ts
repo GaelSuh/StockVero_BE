@@ -4,9 +4,6 @@ import swaggerJsdoc from 'swagger-jsdoc';
 const routesInSrc = path.join(process.cwd(), 'src', 'routes', '**', '*.ts');
 const routesInDist = path.join(process.cwd(), 'dist', 'routes', '**', '*.js');
 
-// Use the same port the server binds on so Swagger "Try it out" requests reach the right address.
-const port = process.env.PORT || 4000;
-
 export const swaggerSpec = swaggerJsdoc({
   definition: {
     openapi: '3.0.3',
@@ -14,7 +11,7 @@ export const swaggerSpec = swaggerJsdoc({
       title: 'StockVero API',
       version: '1.0.0',
     },
-    servers: [{ url: `http://localhost:${port}` }],
+    // No servers entry: "Try it out" calls whichever address is serving the docs.
     components: {
       securitySchemes: {
         bearerAuth: {
