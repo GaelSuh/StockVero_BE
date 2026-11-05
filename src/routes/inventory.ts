@@ -1,10 +1,9 @@
 import { Router, Response } from 'express';
 import crypto from 'crypto';
 import { z } from 'zod';
-import { createClient } from '@supabase/supabase-js';
 import { tenantGuard, moduleGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
 import { prisma } from '../db.js';
-import { STORAGE_BUCKET } from '../lib/storage.js';
+import { STORAGE_BUCKET, supabase } from '../lib/storage.js';
 import { AuthRequest } from '../types/index.js';
 import { checkInventoryCategoryDependencies, checkProductItemDependencies } from '../services/dependencyCheckService.js';
 import { broadcastToModule } from '../services/notificationService.js';
@@ -73,10 +72,7 @@ const RestockSchema = z.object({
   note: z.string().optional(),
 });
 
-const supabaseUrl = process.env.SUPABASE_URL || '';
-const supabaseKey = process.env.SUPABASE_KEY || '';
 const bucket = STORAGE_BUCKET;
-const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 
 const parseItemMeta = (description?: string | null) => {
   if (!description) {
@@ -113,7 +109,7 @@ const resolveSignedUrl = async (url: string) => {
   if (!supabase) return url;
   try {
     const parsed = new URL(url);
-    const supabaseOrigin = new URL(supabaseUrl).origin;
+    const supabaseOrigin = new URL(process.env.SUPABASE_URL ?? '').origin;
     const publicPrefix = `/storage/v1/object/public/${bucket}/`;
     const signedPrefix = `/storage/v1/object/sign/${bucket}/`;
 

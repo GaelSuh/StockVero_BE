@@ -3,18 +3,16 @@ import { createClient } from '@supabase/supabase-js';
 const supabaseUrl = process.env.SUPABASE_URL || '';
 const supabaseKey = process.env.SUPABASE_KEY || '';
 /**
- * Supabase storage bucket.
+ * Public Supabase storage bucket (SUPABASE_STORAGE_BUCKET): product images,
+ * documents, avatars and tenant logos.
  *
- * Still named solarflow-files, deliberately. The bucket name is baked into every
- * URL already written to the database — product images, documents, avatars and
- * tenant logos all point at /storage/v1/object/public/solarflow-files/... — so
- * changing this default alone would 404 all of them.
- *
- * Renaming it for real means: create stockvero-files in Supabase, copy the
- * objects across, rewrite the stored URLs, then set SUPABASE_STORAGE_BUCKET.
- * The env var already overrides this, so no code change is needed for that.
+ * Currently solarflow-files. The bucket name is baked into every URL already
+ * written to the database (/storage/v1/object/public/solarflow-files/...), so
+ * changing the variable alone would 404 all of them. Renaming it for real means:
+ * create the new bucket, copy the objects across, rewrite the stored URLs, then
+ * change the variable.
  */
-export const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'solarflow-files';
+export const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET ?? '';
 
 /**
  * Separate PRIVATE bucket, for objects that must never be readable by URL
@@ -29,8 +27,7 @@ export const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'solarflow-
  *
  * This bucket must exist and must have Public = OFF in Supabase.
  */
-export const PRIVATE_STORAGE_BUCKET =
-  process.env.SUPABASE_PRIVATE_BUCKET || 'stockvero-private';
+export const PRIVATE_STORAGE_BUCKET = process.env.SUPABASE_PRIVATE_BUCKET ?? '';
 
 export const supabase =
   supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;

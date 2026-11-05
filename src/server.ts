@@ -1,6 +1,7 @@
 import express, { Express, Request, Response } from 'express';
 import cors from 'cors';
 import 'dotenv/config';
+import './config/env.js';
 import helmet from 'helmet';
 import compression from 'compression';
 import swaggerUi from 'swagger-ui-express';
@@ -52,9 +53,7 @@ app.use(helmet({
 app.use(compression());
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
-const allowedOrigins = process.env.CORS_ORIGINS
-  ? process.env.CORS_ORIGINS.split(',').map((o) => o.trim())
-  : ['http://localhost:5175'];
+const allowedOrigins = (process.env.CORS_ORIGINS ?? '').split(',').map((o) => o.trim()).filter(Boolean);
 
 app.use(
   cors({
