@@ -19,7 +19,7 @@ import {
 } from '../lib/pricing.js';
 import { getPeriodEnd, toDecimal } from '../services/billing.service.js';
 import { addDays } from '../lib/dates.js';
-import { sendEmail, APP_URL } from '../services/emailService.js';
+import { sendEmail, appLink } from '../services/emailService.js';
 import { tenantApproved as tenantApprovedEmail, tenantDenied as tenantDeniedEmail, tenantSuspended as tenantSuspendedEmail } from '../emails/templates.js';
 
 const CreateTenantSchema = z.object({
@@ -705,7 +705,7 @@ export const approveTenant = async (req: AdminRequest, res: Response) => {
         html: tenantApprovedEmail({
           ownerName: `${owner.firstName} ${owner.lastName}`,
           orgName: tenant.name,
-          loginUrl: `${APP_URL}/login`,
+          loginUrl: appLink('/login'),
         }),
       });
       // TODO: In production, verify EMAIL_FROM domain in Resend dashboard

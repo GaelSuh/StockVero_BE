@@ -2,10 +2,12 @@
 import nodemailer from 'nodemailer';
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
-const RESEND_FROM = process.env.RESEND_FROM || 'StockVero <onboarding@resend.dev>';
+const RESEND_FROM = process.env.RESEND_FROM ?? '';
 
-/** Base of every link in an email. Never localhost: emails are read outside this machine. */
-export const APP_URL = (process.env.FRONTEND_URL || 'https://stockvero.com').replace(/\/+$/, '');
+/** The customer app's address (FRONTEND_URL), for links in emails. Unset: emails go out without a link. */
+const FRONTEND_URL = process.env.FRONTEND_URL?.trim().replace(/\/+$/, '');
+if (!FRONTEND_URL) console.warn('[email] FRONTEND_URL is not set: emails will be sent without links.');
+export const appLink = (path: string) => (FRONTEND_URL ? `${FRONTEND_URL}${path}` : undefined);
 
 const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
