@@ -6,7 +6,7 @@ import { broadcastToModule } from '../services/notificationService.js';
 import { createPurchaseInvoice, deductUnitCost } from '../services/invoiceService.js';
 import { generateSystemId } from '../utils/generateSystemId.js';
 import { deleteStorageFiles } from '../lib/storage.js';
-import { getAvailableStock, isQuantityTracked, resolveStockStatus } from '../lib/stock.js';
+import { getAvailableStock, isQuantityTracked, quantityLots, resolveStockStatus, stockValueAtPrice, type StockLot } from '../lib/stock.js';
 import { stockApprovalRequired } from '../lib/tenantSettings.js';
 import { addQuantityStock } from '../services/quantityStockService.js';
 import {
@@ -508,14 +508,18 @@ const computeCategoryStatuses = async (tenantId: string, where: any) => {
     return map;
   };
 
-  const [stockAvailable, invAvailable, stockDeployed, invInUse, maintenance, faulty, variantQuantitySums] =
+  // A unit carries stockStatus (products) or inventoryStatus (assets), never
+  // both, so maintenance and faulty counts add the two together.
+  const [stockAvailable, invAvailable, stockDeployed, invInUse, maintenance, invMaintenance, faulty, invFaulty, variantQuantitySums] =
     await Promise.all([
       countBy('stockStatus', ['AVAILABLE']),
       countBy('inventoryStatus', ['AVAILABLE']),
       countBy('stockStatus', ['DEPLOYED']),
       countBy('inventoryStatus', ['IN_USE']),
       countBy('stockStatus', ['UNDER_MAINTENANCE']),
+      countBy('inventoryStatus', ['UNDER_MAINTENANCE']),
       countBy('stockStatus', ['FAULTY', 'COMPLETELY_BAD']),
+      countBy('inventoryStatus', ['FAULTY', 'COMPLETELY_BAD']),
       getVariantQuantitySums(tenantId, ids),
     ]);
 
@@ -563,8 +567,8 @@ const computeCategoryStatuses = async (tenantId: string, where: any) => {
       outOfStock,
       available,
       inUse,
-      maintenance: sum(maintenance),
-      faulty: sum(faulty),
+      maintenance: sum(maintenance) + sum(invMaintenance),
+      faulty: sum(faulty) + sum(invFaulty),
       totalValue,
     },
   };
@@ -726,6 +730,24 @@ export const getCategoryById = async (req: AuthRequest, res: Response) => {
       ...(soldAgg ? { soldCount: Math.max(0, -(soldAgg._sum.delta ?? 0)) } : {}),
     };
 
+    // What the stock on hand is worth at selling price, each unit at its
+    // variant's own price (lib/stock.ts stockValueAtPrice, shared with the
+    // dashboard and analytics).
+    const pricedVariants = await (prisma as any).productVariant.findMany({
+      where: { tenantId, categoryId: category.id },
+      select: { id: true, priceOverride: true, quantityOnHand: true },
+    });
+    const valueLots: StockLot[] = quantityTracked
+      ? quantityLots({ ...category, variants: pricedVariants })
+      : (
+          await (prisma as any).productItem.groupBy({
+            by: ['variantId'],
+            where: { tenantId, categoryId: category.id, [statusField(category.type ?? 'STOCK')]: 'AVAILABLE' },
+            _count: { id: true },
+          })
+        ).map((g: any) => ({ variantId: g.variantId ?? null, quantity: g._count.id }));
+    const stockValue = stockValueAtPrice({ sellingPrice: category.sellingPrice, variants: pricedVariants }, valueLots);
+
     // Stock history: category-level stock events (new unit, deployed, maintenance, etc.)
     const stockLogs = await (prisma as any).categoryStockLog.findMany({
       where: { tenantId, categoryId: category.id },
@@ -779,6 +801,7 @@ export const getCategoryById = async (req: AuthRequest, res: Response) => {
       message: 'Category retrieved successfully',
       data: {
         ...formatCategory(category, stats),
+        stockValueAtPrice: stockValue,
         approvedInvoiceId: category.approvedInvoiceId ?? approvedInvoice?.id ?? null,
         authorisedQty,
         addedQty,

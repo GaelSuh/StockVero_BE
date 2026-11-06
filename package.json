@@ -21,6 +21,7 @@
     "backfill:sale-costs": "tsx prisma/scripts/backfill-sale-item-costs.ts",
     "test:analytics": "node --env-file=.env --import tsx --test src/services/analytics/analytics.test.ts",
     "test:credit": "node --env-file=.env --import tsx --test src/services/creditCustomerService.test.ts",
+    "test:stock-value": "node --import tsx --test src/lib/stock.test.ts",
     "test:stock": "node --env-file=.env --import tsx --test src/services/stockConditionService.test.ts",
     "test:audit": "node --env-file=.env --import tsx --test src/services/auditService.test.ts",
     "backfill:audit-names": "tsx prisma/scripts/backfill-audit-actor-names.ts"
