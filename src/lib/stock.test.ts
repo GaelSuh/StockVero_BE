@@ -4,7 +4,7 @@ import { quantityLots, stockValueAtPrice } from './stock.js';
 
 const drinks = {
   stockTrackingMode: 'QUANTITY' as const,
-  quantityOnHand: 96,
+  quantityOnHand: 20, // restocked but not yet shared out to a variant
   sellingPrice: 400,
   variants: [
     { id: 'coke', priceOverride: 500, quantityOnHand: 24 },
@@ -13,8 +13,14 @@ const drinks = {
 };
 
 test('variants are valued at their own price, falling back to the product price', () => {
-  // 24 × 500 (own price) + 48 × 400 (product price); the product's own 96 is not added.
-  assert.equal(stockValueAtPrice(drinks, quantityLots(drinks)), 24 * 500 + 48 * 400);
+  // 24 × 500 (own price) + 48 × 400 (product price) + 20 not yet shared out × 400.
+  assert.equal(stockValueAtPrice(drinks, quantityLots(drinks)), 24 * 500 + 48 * 400 + 20 * 400);
+});
+
+test('stock not yet shared out is its own lot, and only when there is some', () => {
+  const lots = quantityLots(drinks);
+  assert.deepEqual(lots[lots.length - 1], { variantId: null, quantity: 20 });
+  assert.equal(quantityLots({ ...drinks, quantityOnHand: 0 }).length, 2);
 });
 
 test('a product without variants is valued at its own count and price', () => {

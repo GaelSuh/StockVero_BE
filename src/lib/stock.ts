@@ -93,12 +93,15 @@ export const stockValueAtPrice = (product: PricedProduct, lots: StockLot[]): num
 
 /**
  * What a quantity-tracked product has on hand, split by variant. Once it has
- * variants, their own counters are what sales move, so they are the stock (the
- * same rule as the inventory list); otherwise the product's own count.
+ * variants, each variant's own counter is its stock and the product's own
+ * count is what has not been shared out to a variant yet (see shareOutStock in
+ * variants.controller.ts); without variants it is simply the product's count.
  */
 export const quantityLots = (
   product: StockCarrier & { variants?: Array<{ id: string; quantityOnHand?: number | null }> },
-): StockLot[] =>
-  product.variants && product.variants.length > 0
-    ? product.variants.map((v) => ({ variantId: v.id, quantity: v.quantityOnHand ?? 0 }))
-    : [{ variantId: null, quantity: product.quantityOnHand ?? 0 }];
+): StockLot[] => {
+  const own: StockLot = { variantId: null, quantity: product.quantityOnHand ?? 0 };
+  if (!product.variants || product.variants.length === 0) return [own];
+  const lots = product.variants.map((v) => ({ variantId: v.id, quantity: v.quantityOnHand ?? 0 }));
+  return own.quantity > 0 ? [...lots, own] : lots;
+};

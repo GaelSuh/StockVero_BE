@@ -390,15 +390,14 @@ type CategoryStats = Awaited<ReturnType<typeof buildCategoryStats>> & {
 const formatCategory = (cat: any, stats: CategoryStats) => {
   const isStock = (cat.type ?? 'STOCK') === 'STOCK';
   const variantCount = cat._count?.variants ?? 0;
-  // Quantity-tracked products have no unit rows; their stock is the column —
-  // UNLESS the product has variants, in which case each variant carries its
-  // OWN quantityOnHand (see assertVariantQuantityWithinCeiling in
-  // variants.controller.ts) and a sale deducts from the variant, never from
-  // this category's own column. The category's number then stops moving —
-  // the sum of the variants is the number that is actually still true.
+  // Quantity-tracked products have no unit rows; their stock is the column.
+  // Once the product has variants, each variant carries its own count and the
+  // product's column is the stock not yet shared out to any of them (see
+  // shareOutStock in variants.controller.ts) — still sellable as the product
+  // itself. Everything in stock is both together.
   const availableCount =
     isQuantityTracked(cat) && variantCount > 0
-      ? (stats.variantQuantitySum ?? 0)
+      ? (stats.variantQuantitySum ?? 0) + Math.max(cat.quantityOnHand ?? 0, 0)
       : getAvailableStock(cat, stats.availableCount);
   const valuedCount = isQuantityTracked(cat)
     ? availableCount
@@ -534,13 +533,12 @@ const computeCategoryStatuses = async (tenantId: string, where: any) => {
   for (const cat of categories) {
     const isStock = (cat.type ?? 'STOCK') === 'STOCK';
     const units = isStock ? (stockAvailable[cat.id] ?? 0) : (invAvailable[cat.id] ?? 0);
-    // Same rule as formatCategory: once a QUANTITY product has variants, each
-    // variant's own counter is what a sale actually moves, so their sum is
-    // what "on hand" means now — never the category's own frozen column.
+    // Same rule as formatCategory: with variants, on hand is what the variants
+    // hold plus what has not been shared out to them yet.
     const hasVariants = (cat._count?.variants ?? 0) > 0;
     const onHand =
       isQuantityTracked(cat) && hasVariants
-        ? (variantQuantitySums[cat.id] ?? 0)
+        ? (variantQuantitySums[cat.id] ?? 0) + Math.max(cat.quantityOnHand ?? 0, 0)
         : getAvailableStock(cat, units);
 
     available += onHand;
