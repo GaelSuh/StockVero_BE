@@ -735,8 +735,12 @@ export const getCategoryById = async (req: AuthRequest, res: Response) => {
     // dashboard and analytics).
     const pricedVariants = await (prisma as any).productVariant.findMany({
       where: { tenantId, categoryId: category.id },
-      select: { id: true, priceOverride: true, quantityOnHand: true },
+      select: { id: true, priceOverride: true, quantityOnHand: true, quantityFaulty: true, quantityDamaged: true },
     });
+    // Set aside (not sellable) across the product and all its variants, for the
+    // stock summary of a quantity product.
+    const setAside = (field: 'quantityFaulty' | 'quantityDamaged') =>
+      Number(category[field] ?? 0) + pricedVariants.reduce((n: number, v: any) => n + Number(v[field] ?? 0), 0);
     const valueLots: StockLot[] = quantityTracked
       ? quantityLots({ ...category, variants: pricedVariants })
       : (
@@ -802,6 +806,9 @@ export const getCategoryById = async (req: AuthRequest, res: Response) => {
       data: {
         ...formatCategory(category, stats),
         stockValueAtPrice: stockValue,
+        ...(quantityTracked
+          ? { quantityFaultyTotal: setAside('quantityFaulty'), quantityDamagedTotal: setAside('quantityDamaged') }
+          : {}),
         approvedInvoiceId: category.approvedInvoiceId ?? approvedInvoice?.id ?? null,
         authorisedQty,
         addedQty,
