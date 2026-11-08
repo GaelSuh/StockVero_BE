@@ -46,7 +46,8 @@ export function suggestedReorder(onHand: number, avgDaily: number, threshold: nu
 }
 
 export async function stockAnalytics(tenantId: string, f: AnalyticsFilters, canSeeCosts: boolean) {
-  const productWhere: Record<string, unknown> = { tenantId, type: 'STOCK' };
+  // Services are sold but never stocked, so they have no place in stock reports.
+  const productWhere: Record<string, unknown> = { tenantId, type: 'STOCK', stockTrackingMode: { not: 'SERVICE' } };
   if (f.categoryId) productWhere.productCategoryId = f.categoryId;
   if (f.channel === 'RETAIL') productWhere.retailEnabled = true;
   if (f.channel === 'WHOLESALE') productWhere.wholesaleEnabled = true;

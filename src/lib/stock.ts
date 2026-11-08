@@ -15,7 +15,11 @@
  * defaults to undefined, which reproduces the pre-variants behavior exactly.
  */
 
-export type StockTrackingMode = 'SERIALIZED' | 'QUANTITY';
+/**
+ * SERVICE: sold without any stock (a game session, a delivery fee, a repair).
+ * Never checked, deducted, restored, valued or listed as stock.
+ */
+export type StockTrackingMode = 'SERIALIZED' | 'QUANTITY' | 'SERVICE';
 
 export interface StockCarrier {
   stockTrackingMode?: StockTrackingMode | null;
@@ -30,6 +34,10 @@ export interface VariantStockCarrier {
 
 export const isQuantityTracked = (category: StockCarrier): boolean =>
   (category.stockTrackingMode ?? 'SERIALIZED') === 'QUANTITY';
+
+/** Sold without stock: every stock check, deduction and count skips it. */
+export const isService = (category: StockCarrier | null | undefined): boolean =>
+  category?.stockTrackingMode === 'SERVICE';
 
 /**
  * @param category      the product row

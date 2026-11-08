@@ -1246,6 +1246,9 @@ enum IdentifierType {
 enum StockTrackingMode {
   SERIALIZED
   QUANTITY
+  /// Sold without stock (a game session, a delivery fee, a repair): never
+  /// checked, deducted, restored, valued or counted as stock.
+  SERVICE
 }
 
 enum ProductType {

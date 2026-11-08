@@ -51,7 +51,8 @@ export const getStats = async (req: AuthRequest, res: Response) => {
       inventoryEnabled
         ? (async () => {
             const categories = await (prisma as any).inventoryCategory.findMany({
-              where: { tenantId, reorderThreshold: { gt: 0 } },
+              // Services have no stock, so they are never "low".
+              where: { tenantId, reorderThreshold: { gt: 0 }, stockTrackingMode: { not: 'SERVICE' } },
               select: {
                 id: true,
                 name: true,

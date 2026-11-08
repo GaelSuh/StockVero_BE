@@ -6,7 +6,7 @@ import { broadcastToModule } from '../services/notificationService.js';
 import { createPurchaseInvoice, deductUnitCost } from '../services/invoiceService.js';
 import { generateSystemId } from '../utils/generateSystemId.js';
 import { deleteStorageFiles } from '../lib/storage.js';
-import { getAvailableStock, isQuantityTracked, quantityLots, resolveStockStatus, stockValueAtPrice, type StockLot } from '../lib/stock.js';
+import { getAvailableStock, isQuantityTracked, isService, quantityLots, resolveStockStatus, stockValueAtPrice, type StockLot } from '../lib/stock.js';
 import { stockApprovalRequired } from '../lib/tenantSettings.js';
 import { addQuantityStock } from '../services/quantityStockService.js';
 import {
@@ -176,7 +176,7 @@ export const CategorySchema = z.object({
    * the mode is fixed once units and stock logs exist against it.
    * `CategorySchema.partial()` on update keeps this optional there.
    */
-  stockTrackingMode: z.enum(['SERIALIZED', 'QUANTITY'], {
+  stockTrackingMode: z.enum(['SERIALIZED', 'QUANTITY', 'SERVICE'], {
     error: 'Choose how this product is counted',
   }),
   /** Set the first time stock is received by scanning; remembered thereafter. */
@@ -395,8 +395,11 @@ const formatCategory = (cat: any, stats: CategoryStats) => {
   // product's column is the stock not yet shared out to any of them (see
   // shareOutStock in variants.controller.ts) — still sellable as the product
   // itself. Everything in stock is both together.
-  const availableCount =
-    isQuantityTracked(cat) && variantCount > 0
+  // A service has no stock: nothing available, no status, no value.
+  const service = isService(cat);
+  const availableCount = service
+    ? 0
+    : isQuantityTracked(cat) && variantCount > 0
       ? (stats.variantQuantitySum ?? 0) + Math.max(cat.quantityOnHand ?? 0, 0)
       : getAvailableStock(cat, stats.availableCount);
   const valuedCount = isQuantityTracked(cat)
@@ -449,9 +452,9 @@ const formatCategory = (cat: any, stats: CategoryStats) => {
     // Overrides the unit-count figure from stats for quantity-tracked products.
     availableCount,
     // stockStatus is only meaningful for STOCK categories
-    stockStatus: isStock ? resolveStockStatus(availableCount, cat.reorderThreshold) : null,
+    stockStatus: isStock && !service ? resolveStockStatus(availableCount, cat.reorderThreshold) : null,
     // totalValue: costPrice × on-hand (STOCK / quantity) or × all owned items (INVENTORY)
-    totalValue: Number(cat.costPrice ?? 0) * valuedCount,
+    totalValue: service ? 0 : Number(cat.costPrice ?? 0) * valuedCount,
     createdAt: cat.createdAt,
     updatedAt: cat.updatedAt,
   };
@@ -531,6 +534,11 @@ const computeCategoryStatuses = async (tenantId: string, where: any) => {
   const rows: Array<{ id: string; status: string | null }> = [];
 
   for (const cat of categories) {
+    // Services are listed but are not stock: no count, status or value.
+    if (isService(cat)) {
+      rows.push({ id: cat.id, status: null });
+      continue;
+    }
     const isStock = (cat.type ?? 'STOCK') === 'STOCK';
     const units = isStock ? (stockAvailable[cat.id] ?? 0) : (invAvailable[cat.id] ?? 0);
     // Same rule as formatCategory: with variants, on hand is what the variants
@@ -872,7 +880,8 @@ export const createCategory = async (req: AuthRequest, res: Response) => {
         supplier: data.supplier ?? null,
         costPrice: (data.costPrice ?? 0) as any,
         sellingPrice: data.sellingPrice !== undefined ? (data.sellingPrice as any) : null,
-        plannedQty: data.plannedQty ?? 0,
+        // A service is never stocked, so nothing is authorised or planned.
+        plannedQty: trackingMode === 'SERVICE' ? 0 : (data.plannedQty ?? 0),
         plannedDate: data.plannedDate ? new Date(data.plannedDate) : null,
         reorderThreshold: data.reorderThreshold ?? 0,
         identifierType: (data.identifierType ?? 'NONE') as any,
@@ -909,7 +918,7 @@ export const createCategory = async (req: AuthRequest, res: Response) => {
         // next refetch.
         category.quantityOnHand = openingQty;
       }
-    } else if (submittedBy && (await stockApprovalRequired(tenantId))) {
+    } else if (trackingMode !== 'SERVICE' && submittedBy && (await stockApprovalRequired(tenantId))) {
       // Serialised, and this tenant puts stock purchases in front of finance.
       // With the toggle off there is nothing to approve, so raising an invoice
       // would only leave PENDING paperwork nobody ever actions.
@@ -1490,6 +1499,9 @@ export const restockRequest = async (req: AuthRequest, res: Response) => {
     });
     if (!category) {
       return res.status(404).json({ success: false, message: 'Category not found' });
+    }
+    if (isService(category)) {
+      return res.status(400).json({ success: false, message: 'A service has no stock to restock.' });
     }
 
     const { quantity, costPrice, plannedDate, notes } = parsed.data;
