@@ -1,10 +1,13 @@
 import { Response, NextFunction } from 'express';
 import { verifyToken } from '../lib/jwt.js';
 import { UnauthorizedError, ForbiddenError, isDatabaseUnreachable } from '../lib/errors.js';
-import { AuthRequest } from '../types/index.js';
+import { AuthRequest, Permission } from '../types/index.js';
 import { UserRole } from '@prisma/client';
 import { prisma } from '../db.js';
 import { Prisma } from '@prisma/client';
+import { runInBranchScope } from '../lib/branchScope.js';
+import { BRANCH_HEADER, resolveEmployeeBranch, resolveOwnerBranch } from '../lib/branchAccess.js';
+import { buildRolePermissions, enabledModuleKeys } from '../lib/permissions.js';
 
 /** last_seen_at is written at most this often per user. */
 const LAST_SEEN_INTERVAL_MS = 5 * 60 * 1000;
@@ -44,6 +47,14 @@ export async function tenantGuard(req: AuthRequest, res: Response, next: NextFun
       return res.status(401).json({ code: 'INVALID_TOKEN', error: 'Invalid token' });
     }
 
+    // The branch this request works in: the client may pin one with a header
+    // (offline replays keep the branch they were recorded in), otherwise the
+    // token's. Either way it is checked against what this account may open.
+    const headerBranch = req.headers[BRANCH_HEADER];
+    const requestedBranch = (typeof headerBranch === 'string' && headerBranch) || decoded.branchId;
+    let branchId: string | null = null;
+    let branchPermissions: { roleId: string; isAdmin: boolean; permissions: Record<string, Permission>; activeModules: string[] } | undefined;
+
     if (decoded.accountType === 'owner') {
       if (!decoded.userId) {
         return res.status(401).json({ error: 'Invalid token: missing user ID' });
@@ -70,6 +81,12 @@ export async function tenantGuard(req: AuthRequest, res: Response, next: NextFun
       }
 
       touchLastSeen('users', decoded.userId, user.lastSeenAt);
+
+      const resolved = await resolveOwnerBranch(decoded.tenantId, requestedBranch);
+      if (resolved === undefined) {
+        return res.status(403).json({ code: 'BRANCH_ACCESS_DENIED', error: 'You do not have access to this branch.' });
+      }
+      branchId = resolved;
     }
 
     if (decoded.accountType === 'employee') {
@@ -78,7 +95,7 @@ export async function tenantGuard(req: AuthRequest, res: Response, next: NextFun
       }
       const employee = await prisma.employee.findUnique({
         where: { id: decoded.userId },
-        select: { tenantId: true, tokenVersion: true, isActive: true, lastSeenAt: true },
+        select: { tenantId: true, tokenVersion: true, isActive: true, lastSeenAt: true, branchId: true },
       });
 
       if (!employee || employee.tenantId !== decoded.tenantId) {
@@ -94,6 +111,22 @@ export async function tenantGuard(req: AuthRequest, res: Response, next: NextFun
       }
 
       touchLastSeen('employees', decoded.userId, employee.lastSeenAt);
+
+      const resolved = await resolveEmployeeBranch({ id: decoded.userId, branchId: employee.branchId }, requestedBranch);
+      if (!resolved) {
+        return res.status(403).json({ code: 'BRANCH_ACCESS_DENIED', error: 'You do not have access to this branch.' });
+      }
+      branchId = resolved.branchId;
+      if (resolved.accessRole) {
+        // Another branch: the role there, not the one in the token, decides
+        // what this request may do.
+        const built = buildRolePermissions(
+          resolved.accessRole.permissions,
+          await enabledModuleKeys(decoded.tenantId),
+          resolved.accessRole.isAdmin,
+        );
+        branchPermissions = { roleId: resolved.accessRole.id, isAdmin: resolved.accessRole.isAdmin, ...built };
+      }
     }
 
     req.user = {
@@ -102,16 +135,17 @@ export async function tenantGuard(req: AuthRequest, res: Response, next: NextFun
       tenantId: decoded.tenantId,
       role: decoded.role,
       accountType: decoded.accountType,
-      roleId: decoded.roleId,
-      isAdmin: decoded.isAdmin,
+      roleId: branchPermissions?.roleId ?? decoded.roleId,
+      isAdmin: branchPermissions?.isAdmin ?? decoded.isAdmin,
     };
     req.tenantId = decoded.tenantId;
-    req.activeModules = decoded.active_modules;
-    req.permissions = decoded.permissions || undefined;
+    req.branchId = branchId;
+    req.activeModules = branchPermissions?.activeModules ?? decoded.active_modules;
+    req.permissions = branchPermissions?.permissions ?? (decoded.permissions || undefined);
     req.mustChangePassword = decoded.mustChangePassword || false;
     req.tokenVersion = decoded.tokenVersion;
 
-    next();
+    return runInBranchScope({ tenantId: decoded.tenantId, branchId }, () => next());
   } catch (error) {
     if (error instanceof UnauthorizedError) {
       return res.status(401).json({ code: 'INVALID_TOKEN', error: error.message });

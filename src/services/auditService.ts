@@ -1,4 +1,5 @@
 import { prisma } from '../db.js';
+import { currentBranchScope } from '../lib/branchScope.js';
 import { AuditActorType, AuditStatus } from '@prisma/client';
 import { Request } from 'express';
 
@@ -36,6 +37,7 @@ export async function logAudit(params: AuditParams): Promise<void> {
     await prisma.auditLog.create({
       data: {
         tenantId: params.tenantId,
+        branchId: currentBranchScope()?.branchId ?? null,
         actorType: params.actorType,
         actorId: params.actorId,
         actorName,

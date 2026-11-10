@@ -1,4 +1,4 @@
-import { prisma } from '../db.js';
+import { prisma, prismaUnscoped } from '../db.js';
 
 type PrismaWriteClient =
   | typeof prisma
@@ -15,11 +15,13 @@ export async function getNextSaleNumber(tenantId: string, tx: PrismaWriteClient 
 }
 
 export async function getNextReturnNumber(tenantId: string, tx: PrismaWriteClient = prisma): Promise<string> {
-  const count = await (tx as any).saleReturn.count({ where: { tenantId } });
+  // Company-wide numbering: counted across every branch, so unscoped.
+  const count = await prismaUnscoped.saleReturn.count({ where: { tenantId } });
   return `RT-${String(count + 1).padStart(4, '0')}`;
 }
 
 export async function getNextDeliveryNoteNumber(tenantId: string, tx: PrismaWriteClient = prisma): Promise<string> {
-  const count = await (tx as any).deliveryNote.count({ where: { tenantId } });
+  // Company-wide numbering: counted across every branch, so unscoped.
+  const count = await prismaUnscoped.deliveryNote.count({ where: { tenantId } });
   return `DN-${String(count + 1).padStart(4, '0')}`;
 }

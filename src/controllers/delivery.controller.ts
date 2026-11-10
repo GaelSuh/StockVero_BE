@@ -3,6 +3,7 @@ import { AuthRequest } from '../types/index.js';
 import { prisma } from '../db.js';
 import { getNextDeliveryNoteNumber } from '../services/saleService.js';
 import { auditRequest } from '../services/auditService.js';
+import { activeBranchId } from '../lib/branchScope.js';
 
 export async function createDeliveryNote(req: AuthRequest, res: Response) {
   try {
@@ -21,6 +22,7 @@ export async function createDeliveryNote(req: AuthRequest, res: Response) {
     const deliveryNote = await prisma.deliveryNote.create({
       data: {
         tenantId,
+        branchId: activeBranchId(),
         saleId,
         noteNumber,
         status: 'PENDING',

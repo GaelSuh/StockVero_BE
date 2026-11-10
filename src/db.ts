@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
+import { branchScopeExtension } from './lib/branchScope.js';
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
@@ -25,11 +26,20 @@ pool.on('error', (err) => {
 });
 const adapter = new PrismaPg(pool);
 
-export const prisma = new PrismaClient({
+/**
+ * The raw client: no branch filtering. Only for code that is cross-branch on
+ * purpose — company-wide number sequences, branch management, copying and
+ * transfers between branches, the super-admin console. Everything else uses
+ * `prisma` below.
+ */
+export const prismaUnscoped = new PrismaClient({
   adapter,
   log: process.env.NODE_ENV === 'development'
     ? ['query', 'error', 'warn']
     : ['error'],
 });
+
+/** The client every request uses: limited to the request's branch (see lib/branchScope.ts). */
+export const prisma = prismaUnscoped.$extends(branchScopeExtension);
 
 export { pool };

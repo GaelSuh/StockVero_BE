@@ -4,6 +4,7 @@ import { prisma } from '../db.js';
 import { logAudit, AuditActorType, auditRequest } from '../services/auditService.js';
 import { broadcastToModule } from '../services/notificationService.js';
 import { checkPriceListDependencies } from '../services/dependencyCheckService.js';
+import { activeBranchId } from '../lib/branchScope.js';
 
 /**
  * Price lists (and therefore price rules) live under the `wholesale_sales`
@@ -47,6 +48,7 @@ export async function createPriceList(req: AuthRequest, res: Response) {
     const priceList = await prisma.priceList.create({
       data: {
         tenantId,
+        branchId: activeBranchId(),
         name,
         description: description || null,
         isDefault: isDefault || false,

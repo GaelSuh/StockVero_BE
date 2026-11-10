@@ -1,4 +1,5 @@
 import { prisma } from '../db.js';
+import { currentBranchScope } from '../lib/branchScope.js';
 
 /**
  * What the daily summary endpoint returns.
@@ -158,7 +159,10 @@ export async function generateDailySummary(tenantId: string, date: Date, mode?: 
   const startOfDay = new Date(date);
   startOfDay.setHours(0, 0, 0, 0);
 
-  if (mode) return result;
+  // The stored row is one branch's day; the All branches view computes a
+  // combined figure that has no row of its own.
+  const branchId = currentBranchScope()?.branchId;
+  if (mode || !branchId) return result;
 
   const row = {
     totalSales: result.totalSales,
@@ -173,9 +177,9 @@ export async function generateDailySummary(tenantId: string, date: Date, mode?: 
   };
 
   await prisma.dailySummary.upsert({
-    where: { tenantId_date: { tenantId, date: startOfDay } },
+    where: { tenantId_branchId_date: { tenantId, branchId, date: startOfDay } },
     update: row,
-    create: { tenantId, date: startOfDay, ...row },
+    create: { tenantId, branchId, date: startOfDay, ...row },
   });
 
   return result;

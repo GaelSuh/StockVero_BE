@@ -26,6 +26,9 @@ import { isValidPhone, passwordStrengthMessage } from '../lib/validators.js';
 import { logAudit, extractRequestContext, buildDiff, AuditActorType, AuditStatus } from '../services/auditService.js';
 import { resolveSignedUrl, deleteStoredFile, supabase, STORAGE_BUCKET, uploadPrivateFile } from '../lib/storage.js';
 import crypto from 'crypto';
+import { buildRolePermissions } from '../lib/permissions.js';
+import { MAIN_BRANCH_NAME, MAIN_BRANCH_CODE } from '../lib/branchAccess.js';
+import { mainBranch, resolveEmployeeBranch, sessionBranch, employeeBranchSession, branchPayload, resolveOwnerBranch, ALL_BRANCHES } from '../lib/branchAccess.js';
 
 const PaymentMethodSchema = z.object({
   type: z.enum(['CARD', 'MTN_MOMO', 'ORANGE_MOMO']),
@@ -344,6 +347,8 @@ export const signup = async (req: Request, res: Response) => {
       data: {
         name: organizationName,
         subdomain,
+        // Every tenant starts with its main branch; more can be opened later.
+        branches: { create: { name: MAIN_BRANCH_NAME, code: MAIN_BRANCH_CODE, isMain: true } },
         industry: storedIndustry,
         organizationType: (resolvedOrgType as any) ?? undefined,
         website: website || null,
@@ -656,12 +661,14 @@ export const login = async (req: Request, res: Response) => {
 
       const activeModules = Array.from(new Set([...OWNER_PERMANENT_MODULES, ...user.tenant.modules.filter(m => m.isEnabled).map(m => m.moduleKey)]));
 
+      const ownerBranch = await mainBranch(user.tenantId);
       const token = generateToken({
         userId: user.id,
         tenantId: user.tenantId,
         tenantSlug: user.tenant.subdomain,
         role: user.role,
         accountType: 'owner',
+        branchId: ownerBranch?.id,
         active_modules: activeModules,
         tokenVersion: user.tokenVersion,
       });
@@ -701,6 +708,7 @@ export const login = async (req: Request, res: Response) => {
             phone: user.phone,
           },
           tenant: tenantPayload(user.tenant, logoUrl),
+          ...(await branchPayload({ accountType: 'owner', tenantId: user.tenantId }, ownerBranch?.id ?? null)),
         },
       });
     }
@@ -779,7 +787,16 @@ export const login = async (req: Request, res: Response) => {
     }
 
     const enabledModules = Array.from(new Set([...OWNER_PERMANENT_MODULES, ...employee.tenant.modules.filter(m => m.isEnabled).map(m => m.moduleKey)]));
-    const { activeModules, permissions } = buildEmployeePermissions(
+    // The employee signs in to their own branch; a closed branch admits nobody.
+    if (!(await resolveEmployeeBranch({ id: employee.id, branchId: employee.branchId }, null))) {
+      return res.status(403).json({
+        success: false,
+        code: 'BRANCH_INACTIVE',
+        message: 'Your branch has been closed. Ask the business owner for access.',
+      });
+    }
+
+    const { activeModules, permissions } = buildRolePermissions(
       employee.role.permissions,
       enabledModules,
     );
@@ -789,6 +806,7 @@ export const login = async (req: Request, res: Response) => {
       tenantId: employee.tenantId,
       tenantSlug: employee.tenant.subdomain,
       accountType: 'employee',
+      branchId: employee.branchId,
       roleId: employee.roleId,
       mustChangePassword: employee.mustChangePassword,
       tokenVersion: employee.tokenVersion,
@@ -839,6 +857,10 @@ export const login = async (req: Request, res: Response) => {
         },
         tenant: tenantPayload(employee.tenant, employeeLogoUrl),
         userTheme: empPref?.themeConfig ?? null,
+        ...(await branchPayload(
+          { accountType: 'employee', tenantId: employee.tenantId, employeeId: employee.id, homeBranchId: employee.branchId },
+          employee.branchId,
+        )),
       },
     });
   } catch (error) {
@@ -897,6 +919,7 @@ export const refresh = async (req: Request, res: Response) => {
       tenantId: user.tenantId,
       role: user.role,
       accountType: 'owner',
+      branchId: decoded.branchId,
       active_modules: activeModules,
       tokenVersion: user.tokenVersion,
     });
@@ -991,6 +1014,7 @@ export const changePassword = async (req: AuthRequest, res: Response) => {
         tenantId: user.tenantId,
         role: user.role,
         accountType: 'owner',
+        branchId: sessionBranch(req),
         active_modules: Array.from(new Set([...OWNER_PERMANENT_MODULES, ...tenantModules.map(m => m.moduleKey)])),
         tokenVersion: user.tokenVersion,
       });
@@ -1063,7 +1087,7 @@ export const changePassword = async (req: AuthRequest, res: Response) => {
     });
 
     const enabledModules = Array.from(new Set([...OWNER_PERMANENT_MODULES, ...employee.tenant.modules.filter(m => m.isEnabled).map(m => m.moduleKey)]));
-    const { activeModules, permissions } = buildEmployeePermissions(
+    const { activeModules, permissions } = buildRolePermissions(
       employee.role.permissions,
       enabledModules,
       employee.role.isAdmin,
@@ -1073,6 +1097,7 @@ export const changePassword = async (req: AuthRequest, res: Response) => {
       userId: updated.id,
       tenantId: updated.tenantId,
       accountType: 'employee',
+      branchId: sessionBranch(req),
       roleId: updated.roleId,
       mustChangePassword: false,
       tokenVersion: updated.tokenVersion,
@@ -1117,6 +1142,7 @@ export const me = async (req: AuthRequest, res: Response) => {
         tenantSlug: user.tenant.subdomain,
         role: user.role,
         accountType: 'owner',
+        branchId: sessionBranch(req),
         active_modules: activeModules,
         tokenVersion: user.tokenVersion,
       });
@@ -1145,6 +1171,7 @@ export const me = async (req: AuthRequest, res: Response) => {
           },
           tenant: tenantPayload(user.tenant, logoUrl),
           userTheme: ownerPref?.themeConfig ?? null,
+          ...(await branchPayload({ accountType: 'owner', tenantId: user.tenantId }, req.branchId ?? null)),
         },
       });
     }
@@ -1163,24 +1190,24 @@ export const me = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const enabledModules = Array.from(new Set([...OWNER_PERMANENT_MODULES, ...employee.tenant.modules.filter(m => m.isEnabled).map(m => m.moduleKey)]));
-    const { activeModules, permissions } = buildEmployeePermissions(
-      employee.role.permissions,
-      enabledModules,
-      employee.role.isAdmin,
-    );
+    // Permissions are those of the role in the branch being worked in.
+    const session = await employeeBranchSession(employee, req.branchId);
+    if (!session) {
+      return res.status(403).json({ success: false, code: 'BRANCH_ACCESS_DENIED', message: 'You do not have access to this branch.' });
+    }
 
     const token = generateToken({
       userId: employee.id,
       tenantId: employee.tenantId,
       tenantSlug: employee.tenant.subdomain,
       accountType: 'employee',
-      roleId: employee.roleId,
+      branchId: session.branchId,
+      roleId: session.roleId,
       mustChangePassword: employee.mustChangePassword,
       tokenVersion: employee.tokenVersion,
-      permissions,
-      active_modules: activeModules,
-      isAdmin: employee.role.isAdmin,
+      permissions: session.permissions,
+      active_modules: session.activeModules,
+      isAdmin: session.isAdmin,
     });
 
     const employeeLogoUrl = await resolveSignedUrl(employee.tenant.logoUrl);
@@ -1209,6 +1236,10 @@ export const me = async (req: AuthRequest, res: Response) => {
         },
         tenant: tenantPayload(employee.tenant, employeeLogoUrl),
         userTheme: mePref?.themeConfig ?? null,
+        ...(await branchPayload(
+          { accountType: 'employee', tenantId: employee.tenantId, employeeId: employee.id, homeBranchId: employee.branchId },
+          session.branchId,
+        )),
       },
     });
   } catch (error) {
@@ -1234,33 +1265,6 @@ function getDefaultTheme(): Record<string, any> {
   };
 }
 
-function buildEmployeePermissions(rolePermissions: any[], enabledModules: string[], isAdmin = false) {
-  const permissions: Record<string, Permission> = {};
-  const activeModules: string[] = [];
-
-  for (const perm of rolePermissions) {
-    if (!enabledModules.includes(perm.moduleKey)) continue;
-    if (!perm.canRead) continue;
-    permissions[perm.moduleKey] = {
-      canRead: Boolean(perm.canRead),
-      canCreate: Boolean(perm.canCreate),
-      canUpdate: Boolean(perm.canUpdate),
-      canDelete: Boolean(perm.canDelete),
-    };
-    activeModules.push(perm.moduleKey);
-  }
-
-  // Legacy fallback: roles with isAdmin=true that predate the module-based
-  // permission system may have no RolePermission row for 'administration'.
-  // Grant canRead+canCreate automatically so these employees can still access
-  // the Administration pages without requiring a re-login or migration.
-  if (isAdmin && !permissions['administration'] && enabledModules.includes('administration')) {
-    permissions['administration'] = { canRead: true, canCreate: true, canUpdate: false, canDelete: false };
-    activeModules.push('administration');
-  }
-
-  return { permissions, activeModules };
-}
 
 const UpdateMeSchema = z.object({
   firstName: z.string().min(1).optional(),
@@ -2052,5 +2056,82 @@ export const resetPassword = async (req: Request, res: Response) => {
       success: false,
       message: 'Failed to reset password',
     });
+  }
+};
+
+/**
+ * POST /auth/switch-branch — move this session to another branch (or, for an
+ * owner, to the All branches view). Answers with a new token whose permissions
+ * are the ones of the role in that branch, plus the branch list.
+ */
+export const switchBranch = async (req: AuthRequest, res: Response) => {
+  try {
+    const target = typeof req.body?.branchId === 'string' ? req.body.branchId : '';
+    if (!target) {
+      return res.status(400).json({ success: false, message: 'branchId is required' });
+    }
+
+    if (req.user?.accountType === 'owner') {
+      const user = await prisma.user.findUnique({
+        where: { id: req.user.id },
+        include: { tenant: { include: { modules: true } } },
+      });
+      if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+      const branchId = await resolveOwnerBranch(user.tenantId, target);
+      if (branchId === undefined) {
+        return res.status(403).json({ success: false, code: 'BRANCH_ACCESS_DENIED', message: 'You do not have access to this branch.' });
+      }
+      const activeModules = Array.from(new Set([...OWNER_PERMANENT_MODULES, ...user.tenant.modules.filter(m => m.isEnabled).map(m => m.moduleKey)]));
+      const token = generateToken({
+        userId: user.id,
+        tenantId: user.tenantId,
+        tenantSlug: user.tenant.subdomain,
+        role: user.role,
+        accountType: 'owner',
+        branchId: branchId ?? ALL_BRANCHES,
+        active_modules: activeModules,
+        tokenVersion: user.tokenVersion,
+      });
+      return res.json({
+        success: true,
+        data: { token, ...(await branchPayload({ accountType: 'owner', tenantId: user.tenantId }, branchId)) },
+      });
+    }
+
+    const employee = await prisma.employee.findUnique({
+      where: { id: req.user!.id },
+      include: { tenant: { select: { subdomain: true } }, role: { include: { permissions: true } } },
+    });
+    if (!employee) return res.status(404).json({ success: false, message: 'Employee not found' });
+    const session = await employeeBranchSession(employee, target);
+    if (!session) {
+      return res.status(403).json({ success: false, code: 'BRANCH_ACCESS_DENIED', message: 'You do not have access to this branch.' });
+    }
+    const token = generateToken({
+      userId: employee.id,
+      tenantId: employee.tenantId,
+      tenantSlug: employee.tenant.subdomain,
+      accountType: 'employee',
+      branchId: session.branchId,
+      roleId: session.roleId,
+      mustChangePassword: employee.mustChangePassword,
+      tokenVersion: employee.tokenVersion,
+      permissions: session.permissions,
+      active_modules: session.activeModules,
+      isAdmin: session.isAdmin,
+    });
+    return res.json({
+      success: true,
+      data: {
+        token,
+        ...(await branchPayload(
+          { accountType: 'employee', tenantId: employee.tenantId, employeeId: employee.id, homeBranchId: employee.branchId },
+          session.branchId,
+        )),
+      },
+    });
+  } catch (error) {
+    console.error('Error switching branch:', error);
+    return res.status(500).json({ success: false, message: 'Failed to switch branch' });
   }
 };

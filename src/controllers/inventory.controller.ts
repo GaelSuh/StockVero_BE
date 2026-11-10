@@ -4,6 +4,7 @@ import { prisma } from '../db.js';
 import { AuthRequest } from '../types/index.js';
 import { broadcastToModule } from '../services/notificationService.js';
 import { logAudit, extractRequestContext, AuditActorType } from '../services/auditService.js';
+import { activeBranchId } from '../lib/branchScope.js';
 
 const ItemSchema = z.object({
   sku: z.string().min(1),
@@ -40,8 +41,8 @@ export const createItem = async (req: AuthRequest, res: Response) => {
     }
 
     const data = parsed.data;
-    const existing = await prisma.inventoryItem.findUnique({
-      where: { tenantId_sku: { tenantId: req.tenantId!, sku: data.sku.toUpperCase() } },
+    const existing = await prisma.inventoryItem.findFirst({
+      where: { tenantId: req.tenantId!, sku: data.sku.toUpperCase() },
     });
     if (existing) {
       return res.status(409).json({
@@ -56,6 +57,7 @@ export const createItem = async (req: AuthRequest, res: Response) => {
     const item = await prisma.inventoryItem.create({
       data: {
         tenantId: req.tenantId!,
+        branchId: activeBranchId(),
         sku: data.sku.toUpperCase(),
         name: data.name,
         description: data.description,
@@ -363,6 +365,7 @@ export const createMovement = async (req: AuthRequest, res: Response) => {
       prisma.inventoryMovement.create({
         data: {
           tenantId: req.tenantId!,
+          branchId: activeBranchId(),
           itemId: item.id,
           direction: data.direction,
           quantity: data.quantity,

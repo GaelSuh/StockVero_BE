@@ -2,6 +2,9 @@ import { Router, Response } from 'express';
 import { tenantGuard, moduleGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
 import { AuthRequest } from '../types/index.js';
 import { checkCustomerDependencies } from '../services/dependencyCheckService.js';
+import { lookupCustomer, addCustomerToBranch } from '../services/customerBranchService.js';
+import { auditRequest } from '../services/auditService.js';
+import { ApiError } from '../lib/errors.js';
 import {
   createCustomer,
   listCustomers,
@@ -101,6 +104,47 @@ router.post('/customers', permissionGuard('crm', 'canCreate'), createCustomer);
  *       200:
  *         description: Customer details
  */
+/**
+ * Customers across branches: is this person (by phone or email) already a
+ * customer here, or known in another branch? Elsewhere matches carry name and
+ * contact only — never balances or history.
+ */
+router.get('/customers/lookup', permissionGuard('crm', 'canCreate'), async (req: AuthRequest, res: Response) => {
+  if (!req.branchId) return res.status(409).json({ success: false, code: 'BRANCH_REQUIRED', message: 'Choose a branch first.' });
+  try {
+    const phone = typeof req.query.phone === 'string' ? req.query.phone : undefined;
+    const email = typeof req.query.email === 'string' ? req.query.email : undefined;
+    const data = await lookupCustomer(req.tenantId!, req.branchId, { phone, email });
+    return res.json({ success: true, data });
+  } catch (error) {
+    console.error('Error looking up customer:', error);
+    return res.status(500).json({ success: false, message: 'Customer lookup failed' });
+  }
+});
+
+/** Adds a customer known in another branch to this one (their details, not their account). */
+router.post('/customers/:id/add-to-branch', permissionGuard('crm', 'canCreate'), async (req: AuthRequest, res: Response) => {
+  if (!req.branchId) return res.status(409).json({ success: false, code: 'BRANCH_REQUIRED', message: 'Choose a branch first.' });
+  try {
+    const result = await addCustomerToBranch(req.tenantId!, req.params.id, req.branchId);
+    if (!result.alreadyHere) {
+      auditRequest(req, {
+        action: 'CUSTOMER_ADDED_FROM_BRANCH',
+        module: 'crm',
+        entityType: 'customer',
+        entityId: result.customer.id,
+        entityLabel: result.customer.name,
+        details: { sourceCustomerId: req.params.id },
+      });
+    }
+    return res.status(result.alreadyHere ? 200 : 201).json({ success: true, data: result });
+  } catch (error) {
+    if (error instanceof ApiError) return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
+    console.error('Error adding customer to branch:', error);
+    return res.status(500).json({ success: false, message: 'Could not add the customer to this branch' });
+  }
+});
+
 router.get('/customers/:id', permissionGuard('crm', 'canRead'), getCustomer);
 
 /**

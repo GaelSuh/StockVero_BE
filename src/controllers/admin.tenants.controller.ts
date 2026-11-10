@@ -21,6 +21,7 @@ import { getPeriodEnd, toDecimal } from '../services/billing.service.js';
 import { addDays } from '../lib/dates.js';
 import { sendEmail, appLink } from '../services/emailService.js';
 import { tenantApproved as tenantApprovedEmail, tenantDenied as tenantDeniedEmail, tenantSuspended as tenantSuspendedEmail } from '../emails/templates.js';
+import { MAIN_BRANCH_NAME, MAIN_BRANCH_CODE } from '../lib/branchAccess.js';
 
 const CreateTenantSchema = z.object({
   name: z.string().min(1),
@@ -242,6 +243,7 @@ export const createTenant = async (req: AdminRequest, res: Response) => {
         data: {
           name: data.name.trim(),
           subdomain: slug,
+          branches: { create: { name: MAIN_BRANCH_NAME, code: MAIN_BRANCH_CODE, isMain: true } },
           industry: data.industry?.trim() || null,
           website: data.website?.trim() || null,
           phone: data.phone?.trim() || null,
