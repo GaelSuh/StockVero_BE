@@ -19,16 +19,16 @@ datasource db {
 }
 
 model Tenant {
-  id                         String                      @id @default(uuid())
-  name                       String
-  subdomain                  String                      @unique
-  industry                   String?
-  website                    String?
-  logoUrl                    String?                     @map("logo_url")
-  phone                      String?
-  country                    String?
-  city                       String?
-  state                      String?
+  id        String  @id @default(uuid())
+  name      String
+  subdomain String  @unique
+  industry  String?
+  website   String?
+  logoUrl   String? @map("logo_url")
+  phone     String?
+  country   String?
+  city      String?
+  state     String?
 
   /// Optional business-identity evidence supplied at signup, for the admin who
   /// approves the account. Optional by product decision — signup is never
@@ -38,13 +38,13 @@ model Tenant {
   /// only its object path is stored, in the PRIVATE storage bucket. Nothing here
   /// is a public URL: admins read it through a short-lived signed URL, unlike
   /// the public-bucket URLs the older Document model keeps.
-  verificationIdType   TenantVerificationIdType? @map("verification_id_type")
+  verificationIdType         TenantVerificationIdType?   @map("verification_id_type")
   /// Present for TAX_ID; a national ID card is identified by the image alone.
-  verificationIdNumber String?                   @map("verification_id_number")
+  verificationIdNumber       String?                     @map("verification_id_number")
   /// Object path inside the private bucket, never a URL.
-  verificationDocPath  String?                   @map("verification_doc_path")
-  verificationDocName  String?                   @map("verification_doc_name")
-  verificationDocMime  String?                   @map("verification_doc_mime")
+  verificationDocPath        String?                     @map("verification_doc_path")
+  verificationDocName        String?                     @map("verification_doc_name")
+  verificationDocMime        String?                     @map("verification_doc_mime")
   subscriptionPlan           SubscriptionPlan            @default(STARTER) @map("subscription_plan")
   status                     TenantStatus                @default(PENDING_APPROVAL)
   suspendedReason            String?                     @map("suspended_reason")
@@ -95,7 +95,10 @@ model Tenant {
   subscriptionModules        SubscriptionModule[]
   subscription               Subscription?
   auditLogs                  TenantAuditLog[]
-  financeBalance             TenantFinanceBalance?
+  branches                   Branch[]
+  stockTransfers             StockTransfer[]
+  branchAccess               BranchAccess[]
+  financeBalances            TenantFinanceBalance[]
   modules                    TenantModule[]
   approvedByAdmin            SuperAdmin?                 @relation("TenantApprovedBy", fields: [approvedBy], references: [id])
   /// CUSTOMER by default; INTERNAL/DEMO/TEST tenants are excluded from insights by default.
@@ -119,6 +122,88 @@ model Tenant {
 
   @@index([accountOwnerId])
   @@map("tenants")
+}
+
+/// A location of a tenant (a shop, a warehouse). Every tenant has exactly one
+/// main branch, created with the tenant and holding everything recorded before
+/// branches existed. Daily-work data (stock, sales, customers, cash, projects)
+/// carries a required branchId; company data (roles, users, modules, settings,
+/// number sequences) does not. Request scoping lives in src/lib/branchScope.ts.
+model Branch {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  name      String
+  /// Short code printed on documents, e.g. "LAG". Unique per tenant.
+  code      String
+  address   String?
+  phone     String?
+  isMain    Boolean  @default(false) @map("is_main")
+  /// Inactive branches keep their data (readable in All branches) but nobody
+  /// can sign in to them. The main branch can never be deactivated.
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  employees                  Employee[]
+  branchAccess               BranchAccess[]
+  roles                      Role[]
+  auditLogs                  AuditLog[]
+  notifications              Notification[]
+  inventoryItems             InventoryItem[]
+  productCategories          ProductCategory[]
+  inventoryCategories        InventoryCategory[]
+  productVariants            ProductVariant[]
+  productItems               ProductItem[]
+  productItemMaintenanceLogs ProductItemMaintenanceLog[]
+  categoryStockLogs          CategoryStockLog[]
+  inventoryMovements         InventoryMovement[]
+  stockMovements             StockMovement[]
+  customers                  Customer[]
+  customerContacts           CustomerContact[]
+  customerPurchases          CustomerPurchase[]
+  projects                   Project[]
+  projectMilestones          ProjectMilestone[]
+  projectMaterials           ProjectMaterial[]
+  projectAssignments         ProjectAssignment[]
+  transactions               Transaction[]
+  invoices                   Invoice[]
+  invoicePayments            InvoicePayment[]
+  financeBalances            TenantFinanceBalance[]
+  documents                  Document[]
+  sales                      Sale[]
+  saleReturns                SaleReturn[]
+  priceLists                 PriceList[]
+  deliveryNotes              DeliveryNote[]
+  dailySummaries             DailySummary[]
+  transfersOut               StockTransfer[]             @relation("TransferFrom")
+  transfersIn                StockTransfer[]             @relation("TransferTo")
+
+  @@unique([tenantId, code])
+  @@unique([tenantId, name])
+  @@unique([tenantId], where: raw("is_main"), map: "branches_one_main_per_tenant")
+  @@index([tenantId])
+  @@map("branches")
+}
+
+/// Access for an employee to a branch other than their own (Employee.branchId),
+/// with the role they have there — usually a view-only one.
+model BranchAccess {
+  id         String   @id @default(uuid())
+  tenantId   String   @map("tenant_id")
+  employeeId String   @map("employee_id")
+  branchId   String   @map("branch_id")
+  roleId     String   @map("role_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  branch     Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  role       Role     @relation(fields: [roleId], references: [id], onDelete: Restrict)
+
+  @@unique([employeeId, branchId])
+  @@index([tenantId])
+  @@index([branchId])
+  @@map("branch_access")
 }
 
 model User {
@@ -147,21 +232,21 @@ model User {
 }
 
 model SuperAdmin {
-  id              String           @id @default(uuid())
-  email           String           @unique
-  passwordHash    String           @map("password_hash")
-  firstName       String           @map("first_name")
-  lastName        String           @map("last_name")
-  lastLoginAt     DateTime?        @map("last_login_at")
-  createdAt       DateTime         @default(now()) @map("created_at")
-  updatedAt       DateTime         @updatedAt @map("updated_at")
-  auditLogs       TenantAuditLog[]
-  approvedTenants Tenant[]         @relation("TenantApprovedBy")
-  ownedTenants    Tenant[]         @relation("TenantAccountOwner")
-  tenantNotes     TenantNote[]
-  followUpsAssigned TenantFollowUp[] @relation("FollowUpAssignee")
-  followUpsCreated  TenantFollowUp[] @relation("FollowUpCreator")
-  activityLogs    AdminActivityLog[]
+  id                String             @id @default(uuid())
+  email             String             @unique
+  passwordHash      String             @map("password_hash")
+  firstName         String             @map("first_name")
+  lastName          String             @map("last_name")
+  lastLoginAt       DateTime?          @map("last_login_at")
+  createdAt         DateTime           @default(now()) @map("created_at")
+  updatedAt         DateTime           @updatedAt @map("updated_at")
+  auditLogs         TenantAuditLog[]
+  approvedTenants   Tenant[]           @relation("TenantApprovedBy")
+  ownedTenants      Tenant[]           @relation("TenantAccountOwner")
+  tenantNotes       TenantNote[]
+  followUpsAssigned TenantFollowUp[]   @relation("FollowUpAssignee")
+  followUpsCreated  TenantFollowUp[]   @relation("FollowUpCreator")
+  activityLogs      AdminActivityLog[]
 
   @@map("super_admins")
 }
@@ -188,6 +273,9 @@ model Role {
   name         String
   abbreviation String
   description  String?
+  /// Null = a company role, usable in every branch. Set = a role created for
+  /// one branch by that branch's admins, usable only there.
+  branchId     String?          @map("branch_id")
   isDefault    Boolean          @default(false) @map("is_default")
   /// @deprecated - Legacy flag. Access to the administration module is now
   /// controlled via RolePermission rows for moduleKey "administration".
@@ -198,11 +286,14 @@ model Role {
   updatedAt    DateTime         @updatedAt @map("updated_at")
   employees    Employee[]
   permissions  RolePermission[]
+  branch       Branch?          @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  branchAccess BranchAccess[]
   tenant       Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@unique([tenantId, name])
   @@unique([tenantId, abbreviation])
   @@index([tenantId])
+  @@index([branchId])
   @@map("roles")
 }
 
@@ -225,6 +316,9 @@ model Employee {
   id                      String              @id @default(uuid())
   tenantId                String              @map("tenant_id")
   roleId                  String              @map("role_id")
+  /// The branch this employee works in; roleId is their role there. Access to
+  /// any other branch is a BranchAccess row with its own (usually view-only) role.
+  branchId                String              @map("branch_id")
   firstName               String              @map("first_name")
   lastName                String              @map("last_name")
   email                   String              @unique
@@ -245,9 +339,12 @@ model Employee {
   role                    Role                @relation(fields: [roleId], references: [id])
   tenant                  Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   projectAssignments      ProjectAssignment[]
+  branch                  Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  branchAccess            BranchAccess[]
 
   @@index([tenantId])
   @@index([roleId])
+  @@index([branchId])
   @@map("employees")
 }
 
@@ -343,33 +440,33 @@ model PaymentMethod {
 }
 
 model PaymentTransaction {
-  id              String                   @id @default(uuid())
-  tenantId        String                   @map("tenant_id")
-  subscriptionId  String?                  @map("subscription_id")
-  paymentMethodId String?                  @map("payment_method_id")
-  amount          Decimal                  @db.Decimal(15, 2)
-  currency        String                   @default("XAF")
-  status          PaymentTransactionStatus
-  type            PaymentTransactionType
-  description     String?
-  reference       String?
-  failureReason   String?                  @map("failure_reason")
-  paidAt          DateTime?                @map("paid_at")
-  createdAt       DateTime                 @default(now()) @map("created_at")
-  updatedAt       DateTime                 @updatedAt @map("updated_at")
+  id                String                   @id @default(uuid())
+  tenantId          String                   @map("tenant_id")
+  subscriptionId    String?                  @map("subscription_id")
+  paymentMethodId   String?                  @map("payment_method_id")
+  amount            Decimal                  @db.Decimal(15, 2)
+  currency          String                   @default("XAF")
+  status            PaymentTransactionStatus
+  type              PaymentTransactionType
+  description       String?
+  reference         String?
+  failureReason     String?                  @map("failure_reason")
+  paidAt            DateTime?                @map("paid_at")
+  createdAt         DateTime                 @default(now()) @map("created_at")
+  updatedAt         DateTime                 @updatedAt @map("updated_at")
   // Campay gateway fields (20260720000000_campay_payment_gateway).
-  provider          PaymentProvider @default(NONE)
-  providerReference String?         @unique @map("provider_reference")
-  externalReference String?         @map("external_reference")
-  providerStatus    String?         @map("provider_status")
-  payerPhone        String?         @map("payer_phone")
+  provider          PaymentProvider          @default(NONE)
+  providerReference String?                  @unique @map("provider_reference")
+  externalReference String?                  @map("external_reference")
+  providerStatus    String?                  @map("provider_status")
+  payerPhone        String?                  @map("payer_phone")
   operator          String?
-  operatorReference String?         @map("operator_reference")
-  ussdCode          String?         @map("ussd_code")
-  providerPayload   Json?           @map("provider_payload")
-  paymentMethod   PaymentMethod?           @relation(fields: [paymentMethodId], references: [id])
-  subscription    Subscription?            @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
-  tenant          Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  operatorReference String?                  @map("operator_reference")
+  ussdCode          String?                  @map("ussd_code")
+  providerPayload   Json?                    @map("provider_payload")
+  paymentMethod     PaymentMethod?           @relation(fields: [paymentMethodId], references: [id])
+  subscription      Subscription?            @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  tenant            Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@index([tenantId])
   @@index([subscriptionId])
@@ -381,6 +478,7 @@ model PaymentTransaction {
 model InventoryItem {
   id               String              @id @default(uuid())
   tenantId         String              @map("tenant_id")
+  branchId         String              @map("branch_id")
   sku              String
   name             String
   description      String?
@@ -394,36 +492,42 @@ model InventoryItem {
   createdAt        DateTime            @default(now()) @map("created_at")
   updatedAt        DateTime            @updatedAt @map("updated_at")
   tenant           Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch           Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
   movements        InventoryMovement[]
   projectMaterials ProjectMaterial[]
   stockMovements   StockMovement[]
 
-  @@unique([tenantId, sku])
+  @@unique([tenantId, branchId, sku])
   @@index([tenantId])
+  @@index([branchId])
   @@map("inventory_items")
 }
 
 model ProductCategory {
   id             String              @id @default(uuid())
   tenantId       String              @map("tenant_id")
+  branchId       String              @map("branch_id")
   name           String
   normalizedName String              @map("normalized_name")
   createdAt      DateTime            @default(now()) @map("created_at")
   updatedAt      DateTime            @updatedAt @map("updated_at")
   tenant         Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch         Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
   products       InventoryCategory[]
 
-  @@unique([tenantId, normalizedName])
+  @@unique([tenantId, branchId, normalizedName])
   @@index([tenantId])
+  @@index([branchId])
   @@map("product_categories")
 }
 
 model InventoryCategory {
-  id                String             @id @default(uuid())
-  tenantId          String             @map("tenant_id")
-  sku               String
-  abbreviation      String
-  name              String
+  id                      String            @id @default(uuid())
+  tenantId                String            @map("tenant_id")
+  branchId                String            @map("branch_id")
+  sku                     String
+  abbreviation            String
+  name                    String
   /// Unique per tenant when set, enforced by the PARTIAL unique index
   /// declared below: `(tenant_id, barcode) WHERE barcode IS NOT NULL`.
   ///
@@ -435,15 +539,15 @@ model InventoryCategory {
   ///
   /// The separate non-unique `@@index([tenantId, barcode])` below is kept for
   /// query performance and is not the constraint.
-  barcode           String?
-  productCategoryId String?            @map("product_category_id")
+  barcode                 String?
+  productCategoryId       String?           @map("product_category_id")
   /// How this product's stock is counted. SERIALIZED counts ProductItem rows
   /// (the Installation model); QUANTITY reads quantityOnHand directly.
-  stockTrackingMode StockTrackingMode  @default(SERIALIZED) @map("stock_tracking_mode")
+  stockTrackingMode       StockTrackingMode @default(SERIALIZED) @map("stock_tracking_mode")
   /// Whether each physical unit carries its own barcode (a phone's IMEI) or every
   /// unit shares one product barcode (most solar panels). Null means nobody has
   /// said yet — receiving stock asks once, then remembers.
-  hasUniquePerUnitBarcode Boolean?     @map("has_unique_per_unit_barcode")
+  hasUniquePerUnitBarcode Boolean?          @map("has_unique_per_unit_barcode")
 
   /// Which sales channels this product may be sold through.
   ///
@@ -452,8 +556,8 @@ model InventoryCategory {
   /// by the pallet wholesale. Splitting it into separate per-channel product rows
   /// would recreate the two-disconnected-stock-numbers problem already fixed by
   /// getAvailableStock(). At least one must be true.
-  retailEnabled    Boolean @default(true) @map("retail_enabled")
-  wholesaleEnabled Boolean @default(true) @map("wholesale_enabled")
+  retailEnabled     Boolean            @default(true) @map("retail_enabled")
+  wholesaleEnabled  Boolean            @default(true) @map("wholesale_enabled")
   /// Live on-hand count for QUANTITY products. Distinct from plannedQty, which
   /// keeps its original meaning: the purchase quantity authorised on an invoice.
   quantityOnHand    Int                @default(0) @map("quantity_on_hand")
@@ -482,6 +586,7 @@ model InventoryCategory {
   stockLogs         CategoryStockLog[]
   customerPurchases CustomerPurchase[]
   tenant            Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch            Branch             @relation(fields: [branchId], references: [id], onDelete: Restrict)
   productCategory   ProductCategory?   @relation(fields: [productCategoryId], references: [id], onDelete: SetNull)
   invoices          Invoice[]
   productItems      ProductItem[]
@@ -492,13 +597,16 @@ model InventoryCategory {
   /// none — variantId stays null everywhere downstream and existing data is
   /// untouched. Variants apply only to InventoryCategory, never InventoryItem.
   variants          ProductVariant[]
+  transfersOut      StockTransfer[]    @relation("TransferFromProduct")
+  transfersIn       StockTransfer[]    @relation("TransferToProduct")
 
-  @@unique([tenantId, sku])
-  /// Matches the live index `inventory_categories_tenant_id_barcode_key`.
-  @@unique([tenantId, barcode], where: raw("barcode IS NOT NULL"))
+  @@unique([tenantId, branchId, sku])
+  /// Unique per branch when set (branches copy products, barcodes included).
+  @@unique([tenantId, branchId, barcode], where: raw("barcode IS NOT NULL"))
   @@index([tenantId])
   @@index([tenantId, productCategoryId])
   @@index([tenantId, barcode])
+  @@index([branchId])
   @@map("inventory_categories")
 }
 
@@ -515,6 +623,7 @@ model InventoryCategory {
 model ProductVariant {
   id         String            @id @default(uuid())
   tenantId   String            @map("tenant_id")
+  branchId   String            @map("branch_id")
   category   InventoryCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   categoryId String            @map("category_id")
 
@@ -524,7 +633,7 @@ model ProductVariant {
   /// order the client submitted them in is gone by the time it is read back.
   /// That is why `axisOrder` below exists: the display order cannot be
   /// recovered from this column, only the values.
-  attributes Json   @default("{}")
+  attributes Json     @default("{}")
   /// The axis names in the order the label is built from, e.g.
   /// ["Color","Size","Texture"]. Captured from the submitting client's key
   /// order on the first variant of a product, then reused by every later
@@ -543,7 +652,7 @@ model ProductVariant {
   /// is filled in per variant afterwards. Unique per tenant WHEN SET, via the
   /// partial index below — same shape as barcode, so any number of variants
   /// may have no sku at all.
-  sku        String?
+  sku String?
 
   /// Optional, own barcode distinct from the parent product's — set only
   /// when a variant is physically labelled with its own code. Unique per
@@ -552,7 +661,7 @@ model ProductVariant {
   /// migration SQL because the `partialIndexes` preview feature is enabled
   /// (see the generator block): an undeclared partial index would be
   /// DROPPED by the next migration.
-  barcode    String?
+  barcode String?
 
   /// Null = inherit the parent product's sellingPrice. Set = this variant's
   /// own flat price — itself still outranked by a matching PriceRule tier;
@@ -564,9 +673,9 @@ model ProductVariant {
   /// at all: its stock is the count of AVAILABLE ProductItem rows pointing
   /// at it, read through getAvailableStock (lib/stock.ts) — the same
   /// division of responsibility the parent category already follows.
-  quantityOnHand Int @default(0) @map("quantity_on_hand")
+  quantityOnHand  Int @default(0) @map("quantity_on_hand")
   /// Same split as InventoryCategory.quantityFaulty / quantityDamaged.
-  quantityFaulty Int @default(0) @map("quantity_faulty")
+  quantityFaulty  Int @default(0) @map("quantity_faulty")
   quantityDamaged Int @default(0) @map("quantity_damaged")
 
   isActive  Boolean @default(true) @map("is_active")
@@ -577,24 +686,27 @@ model ProductVariant {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   tenant          Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch          Branch             @relation(fields: [branchId], references: [id], onDelete: Restrict)
   productItems    ProductItem[]
   priceRules      PriceRule[]
   saleItems       SaleItem[]
   saleReturnItems SaleReturnItem[]
   stockLogs       CategoryStockLog[]
 
-  @@unique([tenantId, sku], where: raw("sku IS NOT NULL"))
-  @@unique([tenantId, barcode], where: raw("barcode IS NOT NULL"))
+  @@unique([tenantId, branchId, sku], where: raw("sku IS NOT NULL"))
+  @@unique([tenantId, branchId, barcode], where: raw("barcode IS NOT NULL"))
   @@index([tenantId])
   @@index([tenantId, categoryId])
   @@index([tenantId, categoryId, isActive])
   @@index([tenantId, barcode])
+  @@index([branchId])
   @@map("product_variants")
 }
 
 model ProductItem {
   id                String                      @id @default(uuid())
   tenantId          String                      @map("tenant_id")
+  branchId          String                      @map("branch_id")
   categoryId        String                      @map("category_id")
   /// Was globally @unique; rescoped to unique-per-tenant as part of phase 1
   /// of product variants (2026-09). The format ({ABBR}-{YYYYMMDD}-{seq}) is a
@@ -627,21 +739,24 @@ model ProductItem {
   category          InventoryCategory           @relation(fields: [categoryId], references: [id])
   variant           ProductVariant?             @relation(fields: [variantId], references: [id], onDelete: Restrict)
   tenant            Tenant                      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch            Branch                      @relation(fields: [branchId], references: [id], onDelete: Restrict)
   saleItems         SaleItem[]
 
-  @@unique([tenantId, systemId])
+  @@unique([tenantId, branchId, systemId])
   @@index([tenantId, categoryId])
   @@index([tenantId, categoryId, stockStatus])
   @@index([tenantId, categoryId, inventoryStatus])
   @@index([tenantId, categoryId, variantId, stockStatus])
   @@index([tenantId, categoryId, variantId, inventoryStatus])
   @@index([tenantId, projectId])
+  @@index([branchId])
   @@map("product_items")
 }
 
 model ProductItemMaintenanceLog {
   id            String      @id @default(uuid())
   tenantId      String      @map("tenant_id")
+  branchId      String      @map("branch_id")
   productItemId String      @map("product_item_id")
   performedBy   String      @map("performed_by")
   statusBefore  String      @map("status_before")
@@ -651,14 +766,17 @@ model ProductItemMaintenanceLog {
   createdAt     DateTime    @default(now()) @map("created_at")
   productItem   ProductItem @relation(fields: [productItemId], references: [id], onDelete: Cascade)
   tenant        Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch        Branch      @relation(fields: [branchId], references: [id], onDelete: Restrict)
 
   @@index([tenantId, productItemId])
+  @@index([branchId])
   @@map("product_item_maintenance_logs")
 }
 
 model CategoryStockLog {
   id           String            @id @default(uuid())
   tenantId     String            @map("tenant_id")
+  branchId     String            @map("branch_id")
   categoryId   String            @map("category_id")
   unitSystemId String?           @map("unit_system_id")
   eventType    String            @map("event_type")
@@ -679,6 +797,7 @@ model CategoryStockLog {
   createdAt    DateTime          @default(now()) @map("created_at")
   category     InventoryCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   tenant       Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch       Branch            @relation(fields: [branchId], references: [id], onDelete: Restrict)
   variant      ProductVariant?   @relation(fields: [variantId], references: [id], onDelete: Cascade)
 
   /// Partial, matching the live index `category_stock_logs_tenant_id_offline_id_key`.
@@ -687,12 +806,14 @@ model CategoryStockLog {
   @@unique([tenantId, offlineId], where: raw("offline_id IS NOT NULL"))
   @@index([tenantId, categoryId])
   @@index([tenantId, categoryId, variantId])
+  @@index([branchId])
   @@map("category_stock_logs")
 }
 
 model InventoryMovement {
   id        String            @id @default(uuid())
   tenantId  String            @map("tenant_id")
+  branchId  String            @map("branch_id")
   itemId    String            @map("item_id")
   direction MovementDirection
   quantity  Int
@@ -700,15 +821,18 @@ model InventoryMovement {
   createdAt DateTime          @default(now()) @map("created_at")
   item      InventoryItem     @relation(fields: [itemId], references: [id], onDelete: Cascade)
   tenant    Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch    Branch            @relation(fields: [branchId], references: [id], onDelete: Restrict)
 
   @@index([tenantId])
   @@index([itemId])
+  @@index([branchId])
   @@map("inventory_movements")
 }
 
 model StockMovement {
   id                String            @id @default(uuid())
   tenantId          String            @map("tenant_id")
+  branchId          String            @map("branch_id")
   productId         String            @map("product_id")
   projectId         String?           @map("project_id")
   projectMaterialId String?           @map("project_material_id")
@@ -722,17 +846,20 @@ model StockMovement {
   project           Project?          @relation(fields: [projectId], references: [id])
   projectMaterial   ProjectMaterial?  @relation(fields: [projectMaterialId], references: [id])
   tenant            Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch            Branch            @relation(fields: [branchId], references: [id], onDelete: Restrict)
 
   @@index([tenantId])
   @@index([productId])
   @@index([projectId])
   @@index([projectMaterialId])
+  @@index([branchId])
   @@map("stock_movements")
 }
 
 model Customer {
   id                 String              @id @default(uuid())
   tenantId           String              @map("tenant_id")
+  branchId           String              @map("branch_id")
   name               String
   email              String?
   phone              String?
@@ -747,17 +874,20 @@ model Customer {
   contacts           CustomerContact[]
   purchases          CustomerPurchase[]
   tenant             Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch             Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
   projects           Project[]
   sales              Sale[]
   customerPriceLists CustomerPriceList[]
 
   @@index([tenantId])
+  @@index([branchId])
   @@map("customers")
 }
 
 model CustomerContact {
   id         String   @id @default(uuid())
   tenantId   String   @map("tenant_id")
+  branchId   String   @map("branch_id")
   customerId String   @map("customer_id")
   name       String
   email      String?
@@ -768,15 +898,18 @@ model CustomerContact {
   updatedAt  DateTime @updatedAt @map("updated_at")
   customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
   tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch     Branch   @relation(fields: [branchId], references: [id], onDelete: Restrict)
 
   @@index([tenantId])
   @@index([customerId])
+  @@index([branchId])
   @@map("customer_contacts")
 }
 
 model CustomerPurchase {
   id                  String             @id @default(uuid())
   tenantId            String             @map("tenant_id")
+  branchId            String             @map("branch_id")
   customerId          String             @map("customer_id")
   itemName            String             @map("item_name")
   quantity            Int                @default(1)
@@ -795,16 +928,19 @@ model CustomerPurchase {
   customer            Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
   inventoryCategory   InventoryCategory? @relation(fields: [inventoryCategoryId], references: [id])
   tenant              Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch              Branch             @relation(fields: [branchId], references: [id], onDelete: Restrict)
 
   @@index([tenantId])
   @@index([customerId])
   @@index([inventoryCategoryId])
+  @@index([branchId])
   @@map("customer_purchases")
 }
 
 model Project {
   id              String              @id @default(uuid())
   tenantId        String              @map("tenant_id")
+  branchId        String              @map("branch_id")
   customerId      String?             @map("customer_id")
   name            String
   description     String?
@@ -829,17 +965,20 @@ model Project {
   milestones      ProjectMilestone[]
   customer        Customer?           @relation(fields: [customerId], references: [id])
   tenant          Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch          Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
   stockMovements  StockMovement[]
   transactions    Transaction[]
 
   @@index([tenantId])
   @@index([customerId])
+  @@index([branchId])
   @@map("projects")
 }
 
 model ProjectMilestone {
   id          String          @id @default(uuid())
   tenantId    String          @map("tenant_id")
+  branchId    String          @map("branch_id")
   projectId   String          @map("project_id")
   name        String
   description String?
@@ -853,15 +992,18 @@ model ProjectMilestone {
   updatedAt   DateTime        @updatedAt @map("updated_at")
   project     Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
   tenant      Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch      Branch          @relation(fields: [branchId], references: [id], onDelete: Restrict)
 
   @@index([projectId])
   @@index([tenantId])
+  @@index([branchId])
   @@map("project_milestones")
 }
 
 model ProjectMaterial {
   id                   String             @id @default(uuid())
   tenantId             String             @map("tenant_id")
+  branchId             String             @map("branch_id")
   projectId            String             @map("project_id")
   productId            String?            @map("product_id")
   categoryId           String?            @map("category_id")
@@ -883,18 +1025,21 @@ model ProjectMaterial {
   product              InventoryItem?     @relation(fields: [productId], references: [id])
   project              Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
   tenant               Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch               Branch             @relation(fields: [branchId], references: [id], onDelete: Restrict)
   stockMovements       StockMovement[]
 
   @@index([projectId])
   @@index([productId])
   @@index([categoryId])
   @@index([tenantId])
+  @@index([branchId])
   @@map("project_materials")
 }
 
 model ProjectAssignment {
   id         String   @id @default(uuid())
   tenantId   String   @map("tenant_id")
+  branchId   String   @map("branch_id")
   projectId  String   @map("project_id")
   employeeId String   @map("employee_id")
   role       String   @default("TECHNICIAN")
@@ -902,17 +1047,20 @@ model ProjectAssignment {
   employee   Employee @relation(fields: [employeeId], references: [id])
   project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch     Branch   @relation(fields: [branchId], references: [id], onDelete: Restrict)
 
   @@unique([projectId, employeeId])
   @@index([projectId])
   @@index([employeeId])
   @@index([tenantId])
+  @@index([branchId])
   @@map("project_assignments")
 }
 
 model Transaction {
   id             String            @id @default(uuid())
   tenantId       String            @map("tenant_id")
+  branchId       String            @map("branch_id")
   type           TransactionType
   status         TransactionStatus @default(PENDING)
   amount         Decimal           @db.Decimal(15, 2)
@@ -932,6 +1080,7 @@ model Transaction {
   invoicePayment InvoicePayment?
   project        Project?          @relation(fields: [projectId], references: [id])
   tenant         Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch         Branch            @relation(fields: [branchId], references: [id], onDelete: Restrict)
   sale           Sale?
 
   @@index([tenantId])
@@ -940,12 +1089,14 @@ model Transaction {
   @@index([tenantId, projectId])
   @@index([tenantId, status])
   @@index([tenantId, status, type])
+  @@index([branchId])
   @@map("transactions")
 }
 
 model Invoice {
   id              String             @id @default(uuid())
   tenantId        String             @map("tenant_id")
+  branchId        String             @map("branch_id")
   invoiceNumber   String             @map("invoice_number")
   type            InvoiceType
   status          InvoiceStatus      @default(PENDING)
@@ -978,11 +1129,13 @@ model Invoice {
   category        InventoryCategory? @relation(fields: [categoryId], references: [id])
   project         Project?           @relation(fields: [projectId], references: [id])
   tenant          Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch          Branch             @relation(fields: [branchId], references: [id], onDelete: Restrict)
 
   @@index([tenantId, type, status])
   @@index([tenantId, categoryId])
   @@index([tenantId, projectId])
   @@index([tenantId, customerId])
+  @@index([branchId])
   @@map("invoices")
 }
 
@@ -1015,6 +1168,7 @@ model InvoiceSequence {
 model InvoicePayment {
   id                 String      @id @default(uuid())
   tenantId           String      @map("tenant_id")
+  branchId           String      @map("branch_id")
   invoiceId          String      @map("invoice_id")
   transactionId      String      @unique @map("transaction_id")
   approvedBy         String      @map("approved_by")
@@ -1024,28 +1178,36 @@ model InvoicePayment {
   createdAt          DateTime    @default(now()) @map("created_at")
   invoice            Invoice     @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   tenant             Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch             Branch      @relation(fields: [branchId], references: [id], onDelete: Restrict)
   transaction        Transaction @relation(fields: [transactionId], references: [id])
 
   @@index([tenantId, invoiceId])
   @@index([transactionId])
+  @@index([branchId])
   @@map("invoice_payments")
 }
 
 model TenantFinanceBalance {
   id           String   @id @default(uuid())
-  tenantId     String   @unique @map("tenant_id")
+  tenantId     String   @map("tenant_id")
+  branchId     String   @map("branch_id")
   totalIncome  Decimal  @default(0) @map("total_income") @db.Decimal(15, 2)
   totalExpense Decimal  @default(0) @map("total_expense") @db.Decimal(15, 2)
   netBalance   Decimal  @default(0) @map("net_balance") @db.Decimal(15, 2)
   updatedAt    DateTime @updatedAt @map("updated_at")
   tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch       Branch   @relation(fields: [branchId], references: [id], onDelete: Restrict)
 
+  @@unique([tenantId, branchId])
+  @@index([branchId])
   @@map("tenant_finance_balance")
 }
 
 model Notification {
   id        String               @id @default(uuid())
   tenantId  String               @map("tenant_id")
+  /// Branch the event happened in; null for company-level events.
+  branchId  String?              @map("branch_id")
   userId    String               @map("user_id")
   userType  NotificationUserType @map("user_type")
   type      String
@@ -1055,10 +1217,12 @@ model Notification {
   link      String?
   createdAt DateTime             @default(now()) @map("created_at")
   tenant    Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch    Branch?              @relation(fields: [branchId], references: [id], onDelete: SetNull)
 
   @@index([tenantId, userId, isRead])
   @@index([tenantId, userId, isRead, createdAt])
   @@index([tenantId])
+  @@index([tenantId, branchId])
   @@map("notifications")
 }
 
@@ -1096,6 +1260,7 @@ model EmailVerificationOtp {
 model Document {
   id           String         @id @default(uuid())
   tenantId     String         @map("tenant_id")
+  branchId     String         @map("branch_id")
   sourceModule DocumentModule @map("source_module")
   sourceId     String         @map("source_id")
   name         String
@@ -1109,14 +1274,18 @@ model Document {
   createdAt    DateTime       @default(now()) @map("created_at")
   updatedAt    DateTime       @updatedAt @map("updated_at")
   tenant       Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch       Branch         @relation(fields: [branchId], references: [id], onDelete: Restrict)
 
   @@index([tenantId, sourceModule, sourceId])
+  @@index([branchId])
   @@map("documents")
 }
 
 model AuditLog {
   id          String         @id @default(uuid())
   tenantId    String         @map("tenant_id")
+  /// Branch the event happened in; null for company-level events.
+  branchId    String?        @map("branch_id")
   actorType   AuditActorType @map("actor_type")
   actorId     String?        @map("actor_id")
   actorName   String?        @map("actor_name")
@@ -1132,11 +1301,13 @@ model AuditLog {
   notes       String?
   createdAt   DateTime       @default(now()) @map("created_at")
   tenant      Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch      Branch?        @relation(fields: [branchId], references: [id], onDelete: SetNull)
 
   @@index([tenantId, createdAt(sort: Desc)])
   @@index([tenantId, module])
   @@index([tenantId, actorId])
   @@index([tenantId, action])
+  @@index([tenantId, branchId])
   @@map("audit_logs")
 }
 
@@ -1246,6 +1417,9 @@ enum IdentifierType {
 enum StockTrackingMode {
   SERIALIZED
   QUANTITY
+  /// Sold without stock (a game session, a delivery fee, a repair): never
+  /// checked, deducted, restored, valued or counted as stock.
+  SERVICE
 }
 
 enum ProductType {
@@ -1271,6 +1445,9 @@ enum StockItemStatus {
   /// sale flow marked sold units SOLD. Current code marks them DEPLOYED, but
   /// existing SOLD rows must stay readable.
   SOLD
+  /// Approved for a transfer to another branch and on its way: not sellable here,
+  /// not yet stock there. See StockTransfer.
+  IN_TRANSIT
 }
 
 /// Status values used when the parent category is of type INVENTORY.
@@ -1441,11 +1618,12 @@ enum DeliveryStatus {
 model Sale {
   id         String     @id @default(uuid())
   tenantId   String     @map("tenant_id")
+  branchId   String     @map("branch_id")
   saleNumber String     @map("sale_number")
   mode       SaleMode
   status     SaleStatus @default(COMPLETED)
 
-  customerId String? @map("customer_id")
+  customerId   String? @map("customer_id")
   customerName String? @map("customer_name")
 
   soldById   String               @map("sold_by_id")
@@ -1488,6 +1666,7 @@ model Sale {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   tenant            Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch            Branch         @relation(fields: [branchId], references: [id], onDelete: Restrict)
   customer          Customer?      @relation(fields: [customerId], references: [id])
   transaction       Transaction?   @relation(fields: [transactionId], references: [id])
   items             SaleItem[]
@@ -1500,6 +1679,7 @@ model Sale {
   @@index([tenantId, customerId])
   @@index([tenantId, mode])
   @@index([tenantId, paymentStatus])
+  @@index([branchId])
   @@map("sales")
 }
 
@@ -1527,7 +1707,7 @@ model SaleItem {
   productItemId String? @map("product_item_id")
   /// Denormalized copy of the unit's identifier at sale time, so the receipt
   /// still shows it even if the ProductItem is later edited or removed.
-  serialNumber   String? @map("serial_number")
+  serialNumber  String? @map("serial_number")
 
   /// Null when the product has no variants. Resolved and snapshotted
   /// server-side in sales.controller.ts from the ProductVariant row, not
@@ -1583,6 +1763,7 @@ model SalePayment {
 model SaleReturn {
   id           String @id @default(uuid())
   tenantId     String @map("tenant_id")
+  branchId     String @map("branch_id")
   saleId       String @map("sale_id")
   returnNumber String @map("return_number")
 
@@ -1604,6 +1785,7 @@ model SaleReturn {
   createdAt DateTime @default(now()) @map("created_at")
 
   tenant Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch Branch           @relation(fields: [branchId], references: [id], onDelete: Restrict)
   sale   Sale             @relation(fields: [saleId], references: [id])
   items  SaleReturnItem[]
 
@@ -1611,6 +1793,7 @@ model SaleReturn {
   @@index([tenantId])
   @@index([saleId])
   @@index([tenantId, createdAt])
+  @@index([branchId])
   @@map("sale_returns")
 }
 
@@ -1640,6 +1823,7 @@ model SaleReturnItem {
 model PriceList {
   id          String  @id @default(uuid())
   tenantId    String  @map("tenant_id")
+  branchId    String  @map("branch_id")
   name        String
   description String?
   isDefault   Boolean @default(false) @map("is_default")
@@ -1648,15 +1832,17 @@ model PriceList {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   tenant    Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch    Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
   rules     PriceRule[]
   customers CustomerPriceList[]
 
-  /// At most one default price list per tenant. Partial on `is_default`, so
+  /// At most one default price list per branch. Partial on `is_default`, so
   /// any number of non-default lists coexist. priceResolutionService reads
   /// this with findFirst({ tenantId, isDefault: true }) and would silently
   /// pick an arbitrary winner if two ever existed.
-  @@unique([tenantId], where: raw("is_default"), map: "price_lists_one_default_per_tenant")
+  @@unique([tenantId, branchId], where: raw("is_default"), map: "price_lists_one_default_per_branch")
   @@index([tenantId])
+  @@index([branchId])
   @@map("price_lists")
 }
 
@@ -1713,6 +1899,7 @@ model CustomerPriceList {
 model DeliveryNote {
   id         String         @id @default(uuid())
   tenantId   String         @map("tenant_id")
+  branchId   String         @map("branch_id")
   saleId     String         @map("sale_id")
   noteNumber String         @map("note_number")
   status     DeliveryStatus @default(PENDING)
@@ -1728,12 +1915,14 @@ model DeliveryNote {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   tenant Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch Branch             @relation(fields: [branchId], references: [id], onDelete: Restrict)
   sale   Sale               @relation(fields: [saleId], references: [id])
   items  DeliveryNoteItem[]
 
   @@unique([tenantId, noteNumber])
   @@index([tenantId])
   @@index([saleId])
+  @@index([branchId])
   @@map("delivery_notes")
 }
 
@@ -1753,6 +1942,7 @@ model DeliveryNoteItem {
 model DailySummary {
   id       String   @id @default(uuid())
   tenantId String   @map("tenant_id")
+  branchId String   @map("branch_id")
   date     DateTime @db.Date
 
   totalSales           Int     @default(0) @map("total_sales")
@@ -1766,9 +1956,11 @@ model DailySummary {
   generatedAt DateTime @default(now()) @map("generated_at")
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Restrict)
 
-  @@unique([tenantId, date])
+  @@unique([tenantId, branchId, date])
   @@index([tenantId])
+  @@index([branchId])
   @@map("daily_summaries")
 }
 
@@ -1800,11 +1992,11 @@ model TenantDailyMetric {
   wholesaleSalesCount Int     @default(0) @map("wholesale_sales_count")
   wholesaleSalesValue Decimal @default(0) @map("wholesale_sales_value") @db.Decimal(14, 2)
   // Returns flow, on the day of the return
-  returnsCount Int     @default(0) @map("returns_count")
-  returnsValue Decimal @default(0) @map("returns_value") @db.Decimal(14, 2)
+  returnsCount        Int     @default(0) @map("returns_count")
+  returnsValue        Decimal @default(0) @map("returns_value") @db.Decimal(14, 2)
   // Usage flow
-  activeUsers Int @default(0) @map("active_users")
-  userActions Int @default(0) @map("user_actions")
+  activeUsers         Int     @default(0) @map("active_users")
+  userActions         Int     @default(0) @map("user_actions")
 
   // Catalogue at end of day (STOCK-type products); NULL when not captured
   productCount           Int?     @map("product_count")
@@ -1816,10 +2008,10 @@ model TenantDailyMetric {
   lowStockCount          Int?     @map("low_stock_count")
   deadStockCount         Int?     @map("dead_stock_count")
 
-  flowComputedAt         DateTime  @map("flow_computed_at")
-  pointInTimeCapturedAt  DateTime? @map("point_in_time_captured_at")
-  createdAt              DateTime  @default(now()) @map("created_at")
-  updatedAt              DateTime  @updatedAt @map("updated_at")
+  flowComputedAt        DateTime  @map("flow_computed_at")
+  pointInTimeCapturedAt DateTime? @map("point_in_time_captured_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
@@ -1933,4 +2125,60 @@ model AdminActivityLog {
 
   @@index([createdAt])
   @@map("admin_activity_logs")
+}
+
+/// One branch asking another for stock of a product both of them have (same
+/// name, abbreviation, barcode or code — see lib/productIdentity.ts).
+/// PENDING → (supplier approves, stock leaves it) APPROVED → (requester confirms
+/// it physically arrived, stock is added) RECEIVED. Or REJECTED / CANCELLED.
+/// Not a sale and not a purchase: no finance entry on either side.
+/// Spans two branches, so it is deliberately not in BRANCH_MODELS.
+model StockTransfer {
+  id                String              @id @default(uuid())
+  tenantId          String              @map("tenant_id")
+  /// The branch that has the stock (approves and sends).
+  fromBranchId      String              @map("from_branch_id")
+  /// The branch that asked (receives).
+  toBranchId        String              @map("to_branch_id")
+  fromProductId     String              @map("from_product_id")
+  toProductId       String              @map("to_product_id")
+  fromVariantId     String?             @map("from_variant_id")
+  toVariantId       String?             @map("to_variant_id")
+  status            StockTransferStatus @default(PENDING)
+  quantityRequested Int                 @map("quantity_requested")
+  /// Set on approval; may be less than requested, never more than the supplier has.
+  quantityApproved  Int?                @map("quantity_approved")
+  /// Serialized products: the units the supplier picked (ProductItem ids).
+  unitIds           String[]            @default([]) @map("unit_ids")
+  note              String?
+  /// Reason given when rejected or cancelled.
+  closeReason       String?             @map("close_reason")
+  requestedByName   String              @map("requested_by_name")
+  approvedByName    String?             @map("approved_by_name")
+  receivedByName    String?             @map("received_by_name")
+  closedByName      String?             @map("closed_by_name")
+  createdAt         DateTime            @default(now()) @map("created_at")
+  approvedAt        DateTime?           @map("approved_at")
+  receivedAt        DateTime?           @map("received_at")
+  closedAt          DateTime?           @map("closed_at")
+  updatedAt         DateTime            @updatedAt @map("updated_at")
+  tenant            Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  fromBranch        Branch              @relation("TransferFrom", fields: [fromBranchId], references: [id], onDelete: Restrict)
+  toBranch          Branch              @relation("TransferTo", fields: [toBranchId], references: [id], onDelete: Restrict)
+  fromProduct       InventoryCategory   @relation("TransferFromProduct", fields: [fromProductId], references: [id], onDelete: Cascade)
+  toProduct         InventoryCategory   @relation("TransferToProduct", fields: [toProductId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, fromBranchId, status])
+  @@index([tenantId, toBranchId, status])
+  @@index([fromProductId])
+  @@index([toProductId])
+  @@map("stock_transfers")
+}
+
+enum StockTransferStatus {
+  PENDING
+  APPROVED
+  RECEIVED
+  REJECTED
+  CANCELLED
 }

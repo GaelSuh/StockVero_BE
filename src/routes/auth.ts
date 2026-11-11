@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import multer from 'multer';
-import { signup, login, refresh, changePassword, me, updateMe, forgotPassword, verifyOtp, resetPassword, checkSlug, requestEmailVerification, confirmEmailVerification, uploadSignupVerificationDocument } from '../controllers/auth.controller.js';
+import { signup, login, refresh, changePassword, me, updateMe, forgotPassword, verifyOtp, resetPassword, checkSlug, requestEmailVerification, confirmEmailVerification, uploadSignupVerificationDocument, switchBranch } from '../controllers/auth.controller.js';
 import { tenantGuard, mustChangePasswordGuard } from '../middleware/auth.js';
 
 /**
@@ -279,5 +279,28 @@ router.post('/change-password', tenantGuard, changePassword);
  */
 router.get('/me', tenantGuard, mustChangePasswordGuard, me);
 router.patch('/me', tenantGuard, mustChangePasswordGuard, updateMe);
+
+/**
+ * @openapi
+ * /api/v1/auth/switch-branch:
+ *   post:
+ *     summary: Work in another branch (owners can pass "all" for the All branches view)
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               branchId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: New token for that branch, with the branch list
+ *       403:
+ *         description: No access to that branch
+ */
+router.post('/switch-branch', tenantGuard, mustChangePasswordGuard, switchBranch);
 
 export default router;

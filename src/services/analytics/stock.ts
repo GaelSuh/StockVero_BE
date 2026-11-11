@@ -1,5 +1,5 @@
 import { prisma } from '../../db.js';
-import { getAvailableStock, isQuantityTracked } from '../../lib/stock.js';
+import { getAvailableStock, isQuantityTracked, quantityLots, stockValueAtPrice, type StockLot } from '../../lib/stock.js';
 import { addDays, doualaToday } from '../tenantMetrics.service.js';
 import { AnalyticsFilters, bucketOf, dayStart, round2 } from './period.js';
 import { COUNTED_SALE_STATUSES } from './sales.js';
@@ -46,7 +46,8 @@ export function suggestedReorder(onHand: number, avgDaily: number, threshold: nu
 }
 
 export async function stockAnalytics(tenantId: string, f: AnalyticsFilters, canSeeCosts: boolean) {
-  const productWhere: Record<string, unknown> = { tenantId, type: 'STOCK' };
+  // Services are sold but never stocked, so they have no place in stock reports.
+  const productWhere: Record<string, unknown> = { tenantId, type: 'STOCK', stockTrackingMode: { not: 'SERVICE' } };
   if (f.categoryId) productWhere.productCategoryId = f.categoryId;
   if (f.channel === 'RETAIL') productWhere.retailEnabled = true;
   if (f.channel === 'WHOLESALE') productWhere.wholesaleEnabled = true;
@@ -57,7 +58,7 @@ export async function stockAnalytics(tenantId: string, f: AnalyticsFilters, canS
       id: true, name: true, sku: true, unit: true, costPrice: true, sellingPrice: true, reorderThreshold: true,
       stockTrackingMode: true, quantityOnHand: true, quantityFaulty: true, quantityDamaged: true, type: true,
       productCategory: { select: { name: true } },
-      variants: { select: { quantityOnHand: true, quantityFaulty: true, quantityDamaged: true } },
+      variants: { select: { id: true, priceOverride: true, quantityOnHand: true, quantityFaulty: true, quantityDamaged: true } },
     },
   });
   const ids = products.map((p: any) => p.id);
@@ -66,7 +67,7 @@ export async function stockAnalytics(tenantId: string, f: AnalyticsFilters, canS
 
   const [unitGroups, velocity, lastSold, logs, rangeLines, purchases, history, assets] = await Promise.all([
     ids.length
-      ? (prisma as any).productItem.groupBy({ by: ['categoryId', 'stockStatus'], where: { tenantId, categoryId: { in: ids } }, _count: { id: true } })
+      ? (prisma as any).productItem.groupBy({ by: ['categoryId', 'stockStatus', 'variantId'], where: { tenantId, categoryId: { in: ids } }, _count: { id: true } })
       : [],
     ids.length
       ? (prisma as any).saleItem.groupBy({ by: ['categoryId'], where: { categoryId: { in: ids }, sale: { ...countedSale, createdAt: { gte: velocitySince } } }, _sum: { quantity: true } })
@@ -104,10 +105,18 @@ export async function stockAnalytics(tenantId: string, f: AnalyticsFilters, canS
   ]);
 
   const units = new Map<string, Record<string, number>>();
+  // Available serialized units per variant, so each is valued at its own price.
+  const availableLots = new Map<string, StockLot[]>();
   for (const g of unitGroups) {
     const m = units.get(g.categoryId) ?? {};
-    m[g.stockStatus ?? 'NONE'] = g._count.id;
+    const status = g.stockStatus ?? 'NONE';
+    m[status] = (m[status] ?? 0) + g._count.id;
     units.set(g.categoryId, m);
+    if (status === 'AVAILABLE') {
+      const lots = availableLots.get(g.categoryId) ?? [];
+      lots.push({ variantId: g.variantId ?? null, quantity: g._count.id });
+      availableLots.set(g.categoryId, lots);
+    }
   }
   const soldLast30 = new Map<string, number>(velocity.map((v: any) => [v.categoryId, Number(v._sum.quantity ?? 0)]));
   const lastSoldAt = new Map<string, Date>(lastSold.map((v: any) => [v.categoryId, v._max.createdAt]));
@@ -119,9 +128,14 @@ export async function stockAnalytics(tenantId: string, f: AnalyticsFilters, canS
 
   const rows = products.map((p: any) => {
     const statusCounts = units.get(p.id) ?? {};
+    // Same rule as the inventory list: once a quantity product has variants,
+    // its stock is the sum of theirs (adding the product's own column too
+    // double-counted it).
+    const lots = isQuantityTracked(p) ? quantityLots(p) : (availableLots.get(p.id) ?? []);
     const onHand = isQuantityTracked(p)
-      ? Number(p.quantityOnHand ?? 0) + p.variants.reduce((s: number, v: any) => s + Number(v.quantityOnHand ?? 0), 0)
+      ? lots.reduce((n, lot) => n + lot.quantity, 0)
       : getAvailableStock(p, statusCounts.AVAILABLE ?? 0);
+    const valueAtPrice = stockValueAtPrice(p, lots);
     if (!isQuantityTracked(p)) for (const [status, n] of Object.entries(statusCounts)) serialized[status] = (serialized[status] ?? 0) + n;
 
     const cost = Number(p.costPrice ?? 0);
@@ -143,19 +157,19 @@ export async function stockAnalytics(tenantId: string, f: AnalyticsFilters, canS
 
     kpis.unitsInStock += Math.max(0, onHand);
     kpis.valueAtCost += Math.max(0, onHand) * cost;
-    kpis.valueAtPrice += Math.max(0, onHand) * price;
+    kpis.valueAtPrice += valueAtPrice;
     if (status === 'LOW_STOCK') kpis.lowStock += 1;
     if (status === 'OUT_OF_STOCK') kpis.outOfStock += 1;
-    if (isDead) { kpis.deadStockProducts += 1; kpis.deadStockValue += onHand * (canSeeCosts ? cost : price); }
+    if (isDead) { kpis.deadStockProducts += 1; kpis.deadStockValue += canSeeCosts ? onHand * cost : valueAtPrice; }
 
     const category = p.productCategory?.name ?? UNCATEGORISED;
     const c = byCategory.get(category) ?? { products: 0, units: 0, valueAtCost: 0, valueAtPrice: 0 };
-    c.products += 1; c.units += Math.max(0, onHand); c.valueAtCost += Math.max(0, onHand) * cost; c.valueAtPrice += Math.max(0, onHand) * price;
+    c.products += 1; c.units += Math.max(0, onHand); c.valueAtCost += Math.max(0, onHand) * cost; c.valueAtPrice += valueAtPrice;
     byCategory.set(category, c);
 
     return {
       categoryId: p.id, name: p.name, sku: p.sku, unit: p.unit, category, onHand, threshold, status,
-      cost, price, avgDaily: round2(avgDaily),
+      cost, price, valueAtPrice, avgDaily: round2(avgDaily),
       daysLeft: avgDaily > 0 ? Math.floor(onHand / avgDaily) : null,
       suggestedQty: suggestedReorder(onHand, avgDaily, threshold),
       lastSoldAt: last, daysSinceSale, isDead,
@@ -253,7 +267,7 @@ export async function stockAnalytics(tenantId: string, f: AnalyticsFilters, canS
           .map((r: any) => ({
             categoryId: r.categoryId, name: r.name, category: r.category, onHand: r.onHand,
             lastSoldAt: r.lastSoldAt, daysSinceSale: r.daysSinceSale,
-            value: round2(r.onHand * (canSeeCosts ? r.cost : r.price)),
+            value: round2(canSeeCosts ? r.onHand * r.cost : r.valueAtPrice),
           }))
           .sort((a: any, b: any) => b.value - a.value)
           .slice(0, 100),

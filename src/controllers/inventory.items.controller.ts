@@ -6,7 +6,7 @@ import { broadcastToModule } from '../services/notificationService.js';
 import { createPurchaseInvoice, deductUnitCost } from '../services/invoiceService.js';
 import { generateSystemId } from '../utils/generateSystemId.js';
 import { deleteStorageFiles } from '../lib/storage.js';
-import { getAvailableStock, isQuantityTracked, resolveStockStatus } from '../lib/stock.js';
+import { getAvailableStock, isQuantityTracked, isService, quantityLots, resolveStockStatus, stockValueAtPrice, type StockLot } from '../lib/stock.js';
 import { stockApprovalRequired } from '../lib/tenantSettings.js';
 import { addQuantityStock } from '../services/quantityStockService.js';
 import {
@@ -176,7 +176,7 @@ export const CategorySchema = z.object({
    * the mode is fixed once units and stock logs exist against it.
    * `CategorySchema.partial()` on update keeps this optional there.
    */
-  stockTrackingMode: z.enum(['SERIALIZED', 'QUANTITY'], {
+  stockTrackingMode: z.enum(['SERIALIZED', 'QUANTITY', 'SERVICE'], {
     error: 'Choose how this product is counted',
   }),
   /** Set the first time stock is received by scanning; remembered thereafter. */
@@ -390,15 +390,17 @@ type CategoryStats = Awaited<ReturnType<typeof buildCategoryStats>> & {
 const formatCategory = (cat: any, stats: CategoryStats) => {
   const isStock = (cat.type ?? 'STOCK') === 'STOCK';
   const variantCount = cat._count?.variants ?? 0;
-  // Quantity-tracked products have no unit rows; their stock is the column —
-  // UNLESS the product has variants, in which case each variant carries its
-  // OWN quantityOnHand (see assertVariantQuantityWithinCeiling in
-  // variants.controller.ts) and a sale deducts from the variant, never from
-  // this category's own column. The category's number then stops moving —
-  // the sum of the variants is the number that is actually still true.
-  const availableCount =
-    isQuantityTracked(cat) && variantCount > 0
-      ? (stats.variantQuantitySum ?? 0)
+  // Quantity-tracked products have no unit rows; their stock is the column.
+  // Once the product has variants, each variant carries its own count and the
+  // product's column is the stock not yet shared out to any of them (see
+  // shareOutStock in variants.controller.ts) — still sellable as the product
+  // itself. Everything in stock is both together.
+  // A service has no stock: nothing available, no status, no value.
+  const service = isService(cat);
+  const availableCount = service
+    ? 0
+    : isQuantityTracked(cat) && variantCount > 0
+      ? (stats.variantQuantitySum ?? 0) + Math.max(cat.quantityOnHand ?? 0, 0)
       : getAvailableStock(cat, stats.availableCount);
   const valuedCount = isQuantityTracked(cat)
     ? availableCount
@@ -450,9 +452,9 @@ const formatCategory = (cat: any, stats: CategoryStats) => {
     // Overrides the unit-count figure from stats for quantity-tracked products.
     availableCount,
     // stockStatus is only meaningful for STOCK categories
-    stockStatus: isStock ? resolveStockStatus(availableCount, cat.reorderThreshold) : null,
+    stockStatus: isStock && !service ? resolveStockStatus(availableCount, cat.reorderThreshold) : null,
     // totalValue: costPrice × on-hand (STOCK / quantity) or × all owned items (INVENTORY)
-    totalValue: Number(cat.costPrice ?? 0) * valuedCount,
+    totalValue: service ? 0 : Number(cat.costPrice ?? 0) * valuedCount,
     createdAt: cat.createdAt,
     updatedAt: cat.updatedAt,
   };
@@ -508,14 +510,18 @@ const computeCategoryStatuses = async (tenantId: string, where: any) => {
     return map;
   };
 
-  const [stockAvailable, invAvailable, stockDeployed, invInUse, maintenance, faulty, variantQuantitySums] =
+  // A unit carries stockStatus (products) or inventoryStatus (assets), never
+  // both, so maintenance and faulty counts add the two together.
+  const [stockAvailable, invAvailable, stockDeployed, invInUse, maintenance, invMaintenance, faulty, invFaulty, variantQuantitySums] =
     await Promise.all([
       countBy('stockStatus', ['AVAILABLE']),
       countBy('inventoryStatus', ['AVAILABLE']),
       countBy('stockStatus', ['DEPLOYED']),
       countBy('inventoryStatus', ['IN_USE']),
       countBy('stockStatus', ['UNDER_MAINTENANCE']),
+      countBy('inventoryStatus', ['UNDER_MAINTENANCE']),
       countBy('stockStatus', ['FAULTY', 'COMPLETELY_BAD']),
+      countBy('inventoryStatus', ['FAULTY', 'COMPLETELY_BAD']),
       getVariantQuantitySums(tenantId, ids),
     ]);
 
@@ -528,15 +534,19 @@ const computeCategoryStatuses = async (tenantId: string, where: any) => {
   const rows: Array<{ id: string; status: string | null }> = [];
 
   for (const cat of categories) {
+    // Services are listed but are not stock: no count, status or value.
+    if (isService(cat)) {
+      rows.push({ id: cat.id, status: null });
+      continue;
+    }
     const isStock = (cat.type ?? 'STOCK') === 'STOCK';
     const units = isStock ? (stockAvailable[cat.id] ?? 0) : (invAvailable[cat.id] ?? 0);
-    // Same rule as formatCategory: once a QUANTITY product has variants, each
-    // variant's own counter is what a sale actually moves, so their sum is
-    // what "on hand" means now — never the category's own frozen column.
+    // Same rule as formatCategory: with variants, on hand is what the variants
+    // hold plus what has not been shared out to them yet.
     const hasVariants = (cat._count?.variants ?? 0) > 0;
     const onHand =
       isQuantityTracked(cat) && hasVariants
-        ? (variantQuantitySums[cat.id] ?? 0)
+        ? (variantQuantitySums[cat.id] ?? 0) + Math.max(cat.quantityOnHand ?? 0, 0)
         : getAvailableStock(cat, units);
 
     available += onHand;
@@ -563,8 +573,8 @@ const computeCategoryStatuses = async (tenantId: string, where: any) => {
       outOfStock,
       available,
       inUse,
-      maintenance: sum(maintenance),
-      faulty: sum(faulty),
+      maintenance: sum(maintenance) + sum(invMaintenance),
+      faulty: sum(faulty) + sum(invFaulty),
       totalValue,
     },
   };
@@ -726,6 +736,28 @@ export const getCategoryById = async (req: AuthRequest, res: Response) => {
       ...(soldAgg ? { soldCount: Math.max(0, -(soldAgg._sum.delta ?? 0)) } : {}),
     };
 
+    // What the stock on hand is worth at selling price, each unit at its
+    // variant's own price (lib/stock.ts stockValueAtPrice, shared with the
+    // dashboard and analytics).
+    const pricedVariants = await (prisma as any).productVariant.findMany({
+      where: { tenantId, categoryId: category.id },
+      select: { id: true, priceOverride: true, quantityOnHand: true, quantityFaulty: true, quantityDamaged: true },
+    });
+    // Set aside (not sellable) across the product and all its variants, for the
+    // stock summary of a quantity product.
+    const setAside = (field: 'quantityFaulty' | 'quantityDamaged') =>
+      Number(category[field] ?? 0) + pricedVariants.reduce((n: number, v: any) => n + Number(v[field] ?? 0), 0);
+    const valueLots: StockLot[] = quantityTracked
+      ? quantityLots({ ...category, variants: pricedVariants })
+      : (
+          await (prisma as any).productItem.groupBy({
+            by: ['variantId'],
+            where: { tenantId, categoryId: category.id, [statusField(category.type ?? 'STOCK')]: 'AVAILABLE' },
+            _count: { id: true },
+          })
+        ).map((g: any) => ({ variantId: g.variantId ?? null, quantity: g._count.id }));
+    const stockValue = stockValueAtPrice({ sellingPrice: category.sellingPrice, variants: pricedVariants }, valueLots);
+
     // Stock history: category-level stock events (new unit, deployed, maintenance, etc.)
     const stockLogs = await (prisma as any).categoryStockLog.findMany({
       where: { tenantId, categoryId: category.id },
@@ -779,6 +811,10 @@ export const getCategoryById = async (req: AuthRequest, res: Response) => {
       message: 'Category retrieved successfully',
       data: {
         ...formatCategory(category, stats),
+        stockValueAtPrice: stockValue,
+        ...(quantityTracked
+          ? { quantityFaultyTotal: setAside('quantityFaulty'), quantityDamagedTotal: setAside('quantityDamaged') }
+          : {}),
         approvedInvoiceId: category.approvedInvoiceId ?? approvedInvoice?.id ?? null,
         authorisedQty,
         addedQty,
@@ -844,7 +880,8 @@ export const createCategory = async (req: AuthRequest, res: Response) => {
         supplier: data.supplier ?? null,
         costPrice: (data.costPrice ?? 0) as any,
         sellingPrice: data.sellingPrice !== undefined ? (data.sellingPrice as any) : null,
-        plannedQty: data.plannedQty ?? 0,
+        // A service is never stocked, so nothing is authorised or planned.
+        plannedQty: trackingMode === 'SERVICE' ? 0 : (data.plannedQty ?? 0),
         plannedDate: data.plannedDate ? new Date(data.plannedDate) : null,
         reorderThreshold: data.reorderThreshold ?? 0,
         identifierType: (data.identifierType ?? 'NONE') as any,
@@ -881,7 +918,7 @@ export const createCategory = async (req: AuthRequest, res: Response) => {
         // next refetch.
         category.quantityOnHand = openingQty;
       }
-    } else if (submittedBy && (await stockApprovalRequired(tenantId))) {
+    } else if (trackingMode !== 'SERVICE' && submittedBy && (await stockApprovalRequired(tenantId))) {
       // Serialised, and this tenant puts stock purchases in front of finance.
       // With the toggle off there is nothing to approve, so raising an invoice
       // would only leave PENDING paperwork nobody ever actions.
@@ -1462,6 +1499,9 @@ export const restockRequest = async (req: AuthRequest, res: Response) => {
     });
     if (!category) {
       return res.status(404).json({ success: false, message: 'Category not found' });
+    }
+    if (isService(category)) {
+      return res.status(400).json({ success: false, message: 'A service has no stock to restock.' });
     }
 
     const { quantity, costPrice, plannedDate, notes } = parsed.data;

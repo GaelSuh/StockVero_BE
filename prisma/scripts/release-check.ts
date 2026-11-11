@@ -75,7 +75,8 @@ for (const table of ['inventory_categories', 'product_variants']) {
 console.log('\n3. Products by counting mode');
 const { rows: modes } = await db.query(`
   SELECT t.name AS business, c.stock_tracking_mode AS mode, count(*)::int AS products,
-         coalesce(sum(c.quantity_on_hand), 0)::int AS quantity_on_hand,
+         -- A product with variants: its own count (not yet shared out) plus its variants'.
+         coalesce(sum(c.quantity_on_hand + (SELECT coalesce(sum(v.quantity_on_hand), 0) FROM product_variants v WHERE v.category_id = c.id)), 0)::int AS quantity_on_hand,
          (SELECT count(*)::int FROM product_items pi JOIN inventory_categories c2 ON c2.id = pi.category_id
            WHERE c2.tenant_id = t.id AND c2.stock_tracking_mode = c.stock_tracking_mode) AS serial_units
   FROM inventory_categories c JOIN tenants t ON t.id = c.tenant_id
@@ -83,6 +84,29 @@ const { rows: modes } = await db.query(`
 for (const r of modes) {
   console.log(`   ${String(r.business).padEnd(32)} ${String(r.mode).padEnd(11)} ${String(r.products).padStart(5)} products  ` +
     (r.mode === 'QUANTITY' ? `${r.quantity_on_hand} in stock` : `${r.serial_units} units recorded`));
+}
+
+// ── 4. Preview of the variant stock pool fix ────────────────────────────────
+if (pending.includes('20261108000000_variant_stock_pool')) {
+  console.log('\n4. Variant stock pool (20261108000000): product number before → after');
+  const { rows: pool } = await db.query(`
+    WITH variant_stock AS (
+      SELECT category_id, SUM(quantity_on_hand)::int AS held FROM product_variants GROUP BY category_id
+    ), variant_moves AS (
+      SELECT category_id, SUM(delta)::int AS moved FROM category_stock_logs WHERE variant_id IS NOT NULL GROUP BY category_id
+    )
+    SELECT t.name AS business, c.name AS product, c.quantity_on_hand AS before, vs.held,
+           GREATEST(0, c.quantity_on_hand + COALESCE(m.moved, 0) - vs.held) AS after
+    FROM inventory_categories c
+    JOIN variant_stock vs ON vs.category_id = c.id
+    LEFT JOIN variant_moves m ON m.category_id = c.id
+    JOIN tenants t ON t.id = c.tenant_id
+    WHERE c.stock_tracking_mode = 'QUANTITY'
+    ORDER BY 1, 2`);
+  for (const r of pool) {
+    console.log(`   ${String(r.business).padEnd(28)} ${String(r.product).padEnd(28)} ${r.before} → ${r.after} not yet shared out (variants hold ${r.held})`);
+  }
+  if (pool.length === 0) console.log('   no quantity products with variants');
 }
 
 await db.end();

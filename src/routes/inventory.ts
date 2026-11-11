@@ -49,6 +49,9 @@ import {
   getMaintenanceLogs,
   restockRequest,
 } from '../controllers/inventory.items.controller.js';
+import { activeBranchId } from '../lib/branchScope.js';
+import { listCopySources, listCopySourceProducts, runCopy, productElsewhere } from '../controllers/branchCopy.controller.js';
+import * as transfers from '../controllers/stockTransfer.controller.js';
 
 const router = Router();
 router.use(tenantGuard, mustChangePasswordGuard, moduleGuard('inventory'));
@@ -374,6 +377,7 @@ router.post('/products', permissionGuard('inventory', 'canCreate'), async (req, 
     const item = await prisma.inventoryItem.create({
       data: {
         tenantId,
+        branchId: activeBranchId(),
         sku,
         name: data.name,
         description,
@@ -392,6 +396,7 @@ router.post('/products', permissionGuard('inventory', 'canCreate'), async (req, 
     await prisma.stockMovement.create({
       data: {
         tenantId,
+        branchId: activeBranchId(),
         productId: item.id,
         type: 'RESTOCK',
         quantity: data.stock,
@@ -480,6 +485,7 @@ router.patch('/products/:id/restock', permissionGuard('inventory', 'canUpdate'),
       prisma.stockMovement.create({
         data: {
           tenantId,
+          branchId: activeBranchId(),
           productId: existing.id,
           type: 'RESTOCK',
           quantity,
@@ -611,6 +617,7 @@ router.patch('/products/:id', permissionGuard('inventory', 'canUpdate'), async (
       await prisma.stockMovement.create({
         data: {
           tenantId,
+          branchId: activeBranchId(),
           productId: existing.id,
           type: movementType,
           quantity: deltaAbs,
@@ -774,6 +781,8 @@ router.get('/categories/names', permissionGuard('inventory', 'canRead'), listPro
  *       404:
  *         description: Category not found
  */
+// Before /:id. While creating a product: is it already set up in this or another branch?
+router.get('/categories/elsewhere', permissionGuard('inventory', 'canCreate'), productElsewhere);
 router.get('/categories/:id', permissionGuard('inventory', 'canRead'), getCategoryById);
 
 /**
@@ -1322,6 +1331,19 @@ router.post('/movements', permissionGuard('inventory', 'canCreate'), createMovem
  *       200:
  *         description: A category with the same name (ignoring case) already existed
  */
+// Import products from another branch of the company (details, prices,
+// variants, images; never stock). See services/branchCopyService.ts.
+router.get('/copy/sources', permissionGuard('inventory', 'canCreate'), listCopySources);
+router.get('/copy/sources/:branchId/products', permissionGuard('inventory', 'canCreate'), listCopySourceProducts);
+router.post('/copy', permissionGuard('inventory', 'canCreate'), runCopy);
+// Stock transfers between branches: one asks, the other approves, the first confirms receipt.
+router.get('/transfers', permissionGuard('inventory', 'canRead'), transfers.list);
+router.get('/transfers/sources/:productId', permissionGuard('inventory', 'canRead'), transfers.sources);
+router.get('/transfers/:id', permissionGuard('inventory', 'canRead'), transfers.detail);
+router.post('/transfers', permissionGuard('inventory', 'canCreate'), transfers.create);
+router.post('/transfers/:id/approve', permissionGuard('inventory', 'canCreate'), transfers.approve);
+router.post('/transfers/:id/cancel', permissionGuard('inventory', 'canCreate'), transfers.cancel);
+router.post('/transfers/:id/receive', permissionGuard('inventory', 'canCreate'), transfers.receive);
 router.get('/product-categories', permissionGuard('inventory', 'canRead'), listProductCategories);
 router.post('/product-categories', permissionGuard('inventory', 'canCreate'), createProductCategory);
 

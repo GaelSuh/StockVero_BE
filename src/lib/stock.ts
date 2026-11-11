@@ -15,7 +15,11 @@
  * defaults to undefined, which reproduces the pre-variants behavior exactly.
  */
 
-export type StockTrackingMode = 'SERIALIZED' | 'QUANTITY';
+/**
+ * SERVICE: sold without any stock (a game session, a delivery fee, a repair).
+ * Never checked, deducted, restored, valued or listed as stock.
+ */
+export type StockTrackingMode = 'SERIALIZED' | 'QUANTITY' | 'SERVICE';
 
 export interface StockCarrier {
   stockTrackingMode?: StockTrackingMode | null;
@@ -30,6 +34,10 @@ export interface VariantStockCarrier {
 
 export const isQuantityTracked = (category: StockCarrier): boolean =>
   (category.stockTrackingMode ?? 'SERIALIZED') === 'QUANTITY';
+
+/** Sold without stock: every stock check, deduction and count skips it. */
+export const isService = (category: StockCarrier | null | undefined): boolean =>
+  category?.stockTrackingMode === 'SERVICE';
 
 /**
  * @param category      the product row
@@ -60,4 +68,48 @@ export const resolveStockStatus = (availableCount: number, reorderThreshold: num
   if (availableCount === 0) return 'OUT_OF_STOCK';
   if (availableCount <= reorderThreshold) return 'LOW_STOCK';
   return 'IN_STOCK';
+};
+
+// ── Stock value at selling price ─────────────────────────────────────────────
+
+/** Part of what is on hand: units of one variant, or (variantId null) units tied to none. */
+export interface StockLot {
+  variantId: string | null;
+  quantity: number;
+}
+
+export interface PricedProduct {
+  sellingPrice?: unknown;
+  variants?: Array<{ id: string; priceOverride?: unknown }>;
+}
+
+/**
+ * The single rule for "what is this stock worth at selling price": each unit at
+ * its variant's own price when the variant has one, else at the product's
+ * price. A Drinks product with Coca-Cola at 500 and water at 300 is worth
+ * 24 × 500 + 48 × 300, never 72 × the product's price.
+ */
+export const stockValueAtPrice = (product: PricedProduct, lots: StockLot[]): number => {
+  const base = Number(product.sellingPrice ?? 0);
+  const priceOf = new Map((product.variants ?? []).map((v) => [v.id, v.priceOverride]));
+  return lots.reduce((total, lot) => {
+    const override = lot.variantId ? priceOf.get(lot.variantId) : null;
+    const price = override != null ? Number(override) : base;
+    return total + Math.max(0, lot.quantity) * price;
+  }, 0);
+};
+
+/**
+ * What a quantity-tracked product has on hand, split by variant. Once it has
+ * variants, each variant's own counter is its stock and the product's own
+ * count is what has not been shared out to a variant yet (see shareOutStock in
+ * variants.controller.ts); without variants it is simply the product's count.
+ */
+export const quantityLots = (
+  product: StockCarrier & { variants?: Array<{ id: string; quantityOnHand?: number | null }> },
+): StockLot[] => {
+  const own: StockLot = { variantId: null, quantity: product.quantityOnHand ?? 0 };
+  if (!product.variants || product.variants.length === 0) return [own];
+  const lots = product.variants.map((v) => ({ variantId: v.id, quantity: v.quantityOnHand ?? 0 }));
+  return own.quantity > 0 ? [...lots, own] : lots;
 };

@@ -8,6 +8,7 @@ import { logAudit, extractRequestContext, buildDiff, AuditActorType } from '../s
 import { recordStockEvent } from './inventory.items.controller.js';
 import { getCustomerCreditSales, getCustomerPurchaseHistory } from '../services/creditService.js';
 import { isValidPhone } from '../lib/validators.js';
+import { activeBranchId } from '../lib/branchScope.js';
 
 /**
  * A phone number is only meaningful against the country it belongs to — the
@@ -62,6 +63,7 @@ export const createCustomer = async (req: AuthRequest, res: Response) => {
     const customer = await prisma.customer.create({
       data: {
         tenantId: req.tenantId!,
+        branchId: activeBranchId(),
         name: data.name,
         email: data.email,
         phone: data.phone,
@@ -151,6 +153,8 @@ export const listCustomers = async (req: AuthRequest, res: Response) => {
         orderBy: { createdAt: 'desc' },
         skip,
         take: limit,
+        // Shown in the All branches view, where the list spans every branch.
+        include: { branch: { select: { id: true, name: true, code: true } } },
       }),
       prisma.customer.count({ where }),
     ]);

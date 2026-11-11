@@ -8,6 +8,8 @@ import { sendEmail, appLink } from '../services/emailService.js';
 import { employeeWelcome, employeePasswordReset } from '../emails/templates.js';
 import { logAudit, auditRequest, extractRequestContext, buildDiff, AuditActorType } from '../services/auditService.js';
 import { resolveSignedUrl, deleteStoredFile } from '../lib/storage.js';
+import { ApiError } from '../lib/errors.js';
+import { employeeScope, targetBranchFor, assignableRole, assertCanManageEmployee, isOwner } from '../lib/branchAdmin.js';
 
 const CreateEmployeeSchema = z.object({
   firstName: z.string().min(1),
@@ -16,6 +18,8 @@ const CreateEmployeeSchema = z.object({
   phone: z.string().optional(),
   jobTitle: z.string().optional(),
   roleId: z.string().uuid(),
+  /** Owners choose the branch; branch admins always add people to their own. */
+  branchId: z.string().uuid().optional(),
   avatarUrl: z.string().url().optional(),
   isActive: z.boolean().optional(),
 });
@@ -27,6 +31,8 @@ const UpdateEmployeeSchema = z.object({
   phone: z.string().optional(),
   jobTitle: z.string().optional(),
   roleId: z.string().uuid().optional(),
+  /** Moving someone to another branch is for owners only. */
+  branchId: z.string().uuid().optional(),
   avatarUrl: z.string().url().nullable().optional(),
   isActive: z.boolean().optional(),
 });
@@ -69,7 +75,9 @@ export const listEmployees = async (req: AuthRequest, res: Response) => {
     const roleId = typeof req.query.roleId === 'string' ? req.query.roleId : undefined;
     const search = typeof req.query.search === 'string' ? req.query.search : undefined;
 
-    const where: any = { tenantId: req.tenantId! };
+    // Owners can ask for everyone (e.g. to give someone access to another branch).
+    const everyone = isOwner(req) && req.query.allBranches === 'true';
+    const where: any = everyone ? { tenantId: req.tenantId! } : { ...employeeScope(req) };
     if (typeof isActive === 'boolean') where.isActive = isActive;
     if (roleId) where.roleId = roleId;
     if (search) {
@@ -86,6 +94,8 @@ export const listEmployees = async (req: AuthRequest, res: Response) => {
         id: true,
         tenantId: true,
         roleId: true,
+        branchId: true,
+        branch: { select: { id: true, name: true, code: true } },
         firstName: true,
         lastName: true,
         email: true,
@@ -115,6 +125,7 @@ export const listEmployees = async (req: AuthRequest, res: Response) => {
       data,
     });
   } catch (error) {
+    if (error instanceof ApiError) return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
     console.error('Error listing employees:', error);
     return res.status(500).json({
       success: false,
@@ -127,11 +138,13 @@ export const listEmployees = async (req: AuthRequest, res: Response) => {
 export const getEmployee = async (req: AuthRequest, res: Response) => {
   try {
     const employee = await prisma.employee.findFirst({
-      where: { id: req.params.id, tenantId: req.tenantId! },
+      where: { id: req.params.id, ...employeeScope(req) },
       select: {
         id: true,
         tenantId: true,
         roleId: true,
+        branchId: true,
+        branch: { select: { id: true, name: true, code: true } },
         firstName: true,
         lastName: true,
         email: true,
@@ -169,6 +182,7 @@ export const getEmployee = async (req: AuthRequest, res: Response) => {
       data: await serializeEmployee(employee),
     });
   } catch (error) {
+    if (error instanceof ApiError) return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
     console.error('Error fetching employee:', error);
     return res.status(500).json({
       success: false,
@@ -205,15 +219,8 @@ export const createEmployee = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const role = await prisma.role.findFirst({
-      where: { id: payload.roleId, tenantId: req.tenantId! },
-    });
-    if (!role) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid role',
-      });
-    }
+    const branchId = await targetBranchFor(req, payload.branchId);
+    await assignableRole(req, payload.roleId, branchId);
 
     const tenantSlug = await getTenantSlug(req.tenantId!);
     if (!tenantSlug) {
@@ -229,6 +236,7 @@ export const createEmployee = async (req: AuthRequest, res: Response) => {
     const employee = await prisma.employee.create({
       data: {
         tenantId: req.tenantId!,
+        branchId,
         roleId: payload.roleId,
         firstName: payload.firstName.trim(),
         lastName: payload.lastName.trim(),
@@ -244,6 +252,8 @@ export const createEmployee = async (req: AuthRequest, res: Response) => {
         id: true,
         tenantId: true,
         roleId: true,
+        branchId: true,
+        branch: { select: { id: true, name: true, code: true } },
         firstName: true,
         lastName: true,
         email: true,
@@ -317,6 +327,7 @@ export const createEmployee = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (error) {
+    if (error instanceof ApiError) return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
     console.error('Error creating employee:', error);
     return res.status(500).json({
       success: false,
@@ -337,7 +348,7 @@ export const updateEmployee = async (req: AuthRequest, res: Response) => {
     }
 
     const employee = await prisma.employee.findFirst({
-      where: { id: req.params.id, tenantId: req.tenantId! },
+      where: { id: req.params.id, ...employeeScope(req) },
     });
     if (!employee) {
       return res.status(404).json({
@@ -347,16 +358,15 @@ export const updateEmployee = async (req: AuthRequest, res: Response) => {
     }
 
     const payload = parsed.data;
-    if (payload.roleId) {
-      const role = await prisma.role.findFirst({
-        where: { id: payload.roleId, tenantId: req.tenantId! },
-      });
-      if (!role) {
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid role',
-        });
-      }
+    await assertCanManageEmployee(req, employee);
+    const movingBranch = payload.branchId !== undefined && payload.branchId !== employee.branchId;
+    if (movingBranch && !isOwner(req)) {
+      throw new ApiError(403, 'Only the owner can move someone to another branch.', 'BRANCH_ACCESS_DENIED');
+    }
+    const branchId = movingBranch ? await targetBranchFor(req, payload.branchId) : employee.branchId;
+    // The role (new or kept) must be valid where the person will work.
+    if (payload.roleId || movingBranch) {
+      await assignableRole(req, payload.roleId ?? employee.roleId, branchId);
     }
 
     if (payload.email) {
@@ -385,6 +395,11 @@ export const updateEmployee = async (req: AuthRequest, res: Response) => {
     if (payload.phone !== undefined) updates.phone = payload.phone.trim() || null;
     if (payload.jobTitle !== undefined) updates.jobTitle = payload.jobTitle.trim() || null;
     if (payload.roleId !== undefined) updates.roleId = payload.roleId;
+    if (movingBranch) {
+      updates.branchId = branchId;
+      // Their session points at the old branch: sign them out.
+      updates.tokenVersion = { increment: 1 };
+    }
     if (payload.avatarUrl !== undefined) {
       updates.avatarUrl = payload.avatarUrl ? payload.avatarUrl.trim() : null;
     }
@@ -404,6 +419,8 @@ export const updateEmployee = async (req: AuthRequest, res: Response) => {
         id: true,
         tenantId: true,
         roleId: true,
+        branchId: true,
+        branch: { select: { id: true, name: true, code: true } },
         firstName: true,
         lastName: true,
         email: true,
@@ -449,6 +466,7 @@ export const updateEmployee = async (req: AuthRequest, res: Response) => {
       data: await serializeEmployee(updatedEmployee),
     });
   } catch (error) {
+    if (error instanceof ApiError) return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
     console.error('Error updating employee:', error);
     return res.status(500).json({
       success: false,
@@ -469,7 +487,7 @@ export const updateEmployeeRole = async (req: AuthRequest, res: Response) => {
     }
 
     const employee = await prisma.employee.findFirst({
-      where: { id: req.params.id, tenantId: req.tenantId! },
+      where: { id: req.params.id, ...employeeScope(req) },
     });
     if (!employee) {
       return res.status(404).json({
@@ -478,9 +496,8 @@ export const updateEmployeeRole = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const role = await prisma.role.findFirst({
-      where: { id: parsed.data.roleId, tenantId: req.tenantId! },
-    });
+    await assertCanManageEmployee(req, employee);
+    const role = await assignableRole(req, parsed.data.roleId, employee.branchId);
     if (!role) {
       return res.status(400).json({
         success: false,
@@ -499,6 +516,8 @@ export const updateEmployeeRole = async (req: AuthRequest, res: Response) => {
         id: true,
         tenantId: true,
         roleId: true,
+        branchId: true,
+        branch: { select: { id: true, name: true, code: true } },
         firstName: true,
         lastName: true,
         email: true,
@@ -537,6 +556,7 @@ export const updateEmployeeRole = async (req: AuthRequest, res: Response) => {
       data: updatedEmployee,
     });
   } catch (error) {
+    if (error instanceof ApiError) return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
     console.error('Error updating employee role:', error);
     return res.status(500).json({
       success: false,
@@ -557,7 +577,7 @@ export const updateEmployeeStatus = async (req: AuthRequest, res: Response) => {
     }
 
     const employee = await prisma.employee.findFirst({
-      where: { id: req.params.id, tenantId: req.tenantId! },
+      where: { id: req.params.id, ...employeeScope(req) },
     });
     if (!employee) {
       return res.status(404).json({
@@ -565,6 +585,7 @@ export const updateEmployeeStatus = async (req: AuthRequest, res: Response) => {
         message: 'Employee not found',
       });
     }
+    await assertCanManageEmployee(req, employee);
 
     const updates: any = { isActive: parsed.data.isActive };
     if (!parsed.data.isActive && employee.isActive) {
@@ -578,6 +599,8 @@ export const updateEmployeeStatus = async (req: AuthRequest, res: Response) => {
         id: true,
         tenantId: true,
         roleId: true,
+        branchId: true,
+        branch: { select: { id: true, name: true, code: true } },
         firstName: true,
         lastName: true,
         email: true,
@@ -620,6 +643,7 @@ export const updateEmployeeStatus = async (req: AuthRequest, res: Response) => {
       data: updatedEmployee,
     });
   } catch (error) {
+    if (error instanceof ApiError) return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
     console.error('Error updating employee status:', error);
     return res.status(500).json({
       success: false,
@@ -632,7 +656,7 @@ export const updateEmployeeStatus = async (req: AuthRequest, res: Response) => {
 export const resetEmployeePassword = async (req: AuthRequest, res: Response) => {
   try {
     const employee = await prisma.employee.findFirst({
-      where: { id: req.params.id, tenantId: req.tenantId! },
+      where: { id: req.params.id, ...employeeScope(req) },
     });
     if (!employee) {
       return res.status(404).json({
@@ -640,6 +664,7 @@ export const resetEmployeePassword = async (req: AuthRequest, res: Response) => 
         message: 'Employee not found',
       });
     }
+    await assertCanManageEmployee(req, employee);
 
     const tenantSlug = await getTenantSlug(req.tenantId!);
     if (!tenantSlug) {
@@ -700,6 +725,7 @@ export const resetEmployeePassword = async (req: AuthRequest, res: Response) => 
       data: { temporaryPassword },
     });
   } catch (error) {
+    if (error instanceof ApiError) return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
     console.error('Error resetting employee password:', error);
     return res.status(500).json({
       success: false,
@@ -712,7 +738,7 @@ export const resetEmployeePassword = async (req: AuthRequest, res: Response) => 
 export const deleteEmployee = async (req: AuthRequest, res: Response) => {
   try {
     const employee = await prisma.employee.findFirst({
-      where: { id: req.params.id, tenantId: req.tenantId! },
+      where: { id: req.params.id, ...employeeScope(req) },
     });
     if (!employee) {
       return res.status(404).json({
@@ -720,6 +746,7 @@ export const deleteEmployee = async (req: AuthRequest, res: Response) => {
         message: 'Employee not found',
       });
     }
+    await assertCanManageEmployee(req, employee);
 
     await prisma.employee.update({
       where: { id: req.params.id },
@@ -756,6 +783,7 @@ export const deleteEmployee = async (req: AuthRequest, res: Response) => {
       message: 'Employee deactivated successfully',
     });
   } catch (error) {
+    if (error instanceof ApiError) return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
     console.error('Error deleting employee:', error);
     return res.status(500).json({
       success: false,

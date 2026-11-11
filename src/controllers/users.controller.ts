@@ -8,6 +8,8 @@ import { generateToken } from '../lib/jwt.js';
 import { OWNER_PERMANENT_MODULES } from '../config/modules.js';
 import { resolveSignedUrl, deleteStoredFile } from '../lib/storage.js';
 import { logAudit, extractRequestContext, AuditActorType } from '../services/auditService.js';
+import { buildRolePermissions } from '../lib/permissions.js';
+import { sessionBranch } from '../lib/branchAccess.js';
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -34,28 +36,6 @@ const UpdatePreferencesSchema = z.object({
 // ---------------------------------------------------------------------------
 
 /** Build the `permissions` + `activeModules` for an employee JWT. */
-function buildPermissions(rolePermissions: { moduleKey: string; canRead: boolean; canCreate: boolean; canUpdate: boolean; canDelete: boolean }[], enabledModules: string[], isAdmin = false) {
-  const permissions: Record<string, Permission> = {};
-  const activeModules: string[] = [];
-  for (const perm of rolePermissions) {
-    if (!enabledModules.includes(perm.moduleKey)) continue;
-    if (!perm.canRead) continue;
-    permissions[perm.moduleKey] = {
-      canRead: Boolean(perm.canRead),
-      canCreate: Boolean(perm.canCreate),
-      canUpdate: Boolean(perm.canUpdate),
-      canDelete: Boolean(perm.canDelete),
-    };
-    activeModules.push(perm.moduleKey);
-  }
-  // Legacy fallback: roles with isAdmin=true that predate the module-based
-  // permission system may have no RolePermission row for 'administration'.
-  if (isAdmin && !permissions['administration'] && enabledModules.includes('administration')) {
-    permissions['administration'] = { canRead: true, canCreate: true, canUpdate: false, canDelete: false };
-    activeModules.push('administration');
-  }
-  return { permissions, activeModules };
-}
 
 // ---------------------------------------------------------------------------
 // GET /api/v1/users/me/profile
@@ -206,6 +186,7 @@ export const updateMyPassword = async (req: AuthRequest, res: Response) => {
         tenantSlug: updated.tenant.subdomain,
         role: updated.role,
         accountType: 'owner',
+        branchId: sessionBranch(req),
         active_modules: activeModules,
         tokenVersion: updated.tokenVersion,
       });
@@ -251,12 +232,13 @@ export const updateMyPassword = async (req: AuthRequest, res: Response) => {
     });
 
     const enabledModules = Array.from(new Set([...OWNER_PERMANENT_MODULES, ...employee.tenant.modules.filter(m => m.isEnabled).map(m => m.moduleKey)]));
-    const { activeModules, permissions } = buildPermissions(employee.role.permissions, enabledModules, employee.role.isAdmin);
+    const { activeModules, permissions } = buildRolePermissions(employee.role.permissions, enabledModules, employee.role.isAdmin);
 
     const token = generateToken({
       userId: updated.id,
       tenantId: updated.tenantId,
       accountType: 'employee',
+      branchId: sessionBranch(req),
       roleId: updated.roleId,
       mustChangePassword: false,
       tokenVersion: updated.tokenVersion,

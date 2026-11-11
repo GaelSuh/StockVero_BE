@@ -198,7 +198,7 @@ router.patch('/:id/role', permissionGuard('administration', 'canCreate'), update
  *       200:
  *         description: Employee status updated
  */
-router.patch('/:id/status', updateEmployeeStatus);
+router.patch('/:id/status', permissionGuard('administration', 'canCreate'), updateEmployeeStatus);
 
 /**
  * @openapi

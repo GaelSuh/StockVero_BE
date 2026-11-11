@@ -1,4 +1,4 @@
-import { isQuantityTracked } from '../lib/stock.js';
+import { isQuantityTracked, isService } from '../lib/stock.js';
 
 /**
  * The condition of stock: GOOD can be sold; FAULTY is set aside and may be
@@ -85,6 +85,9 @@ export async function moveStockCondition(tx: any, input: MoveInput) {
     select: { id: true, name: true, stockTrackingMode: true, quantityOnHand: true, quantityFaulty: true, quantityDamaged: true },
   });
   if (!product) throw new StockConditionError('Product not found.');
+  if (isService(product)) {
+    throw new StockConditionError('A service has no stock to mark faulty or damaged.');
+  }
   if (!isQuantityTracked(product)) {
     throw new StockConditionError('Items tracked one by one change condition on the unit itself.');
   }

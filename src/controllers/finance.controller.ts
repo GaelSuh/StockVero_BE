@@ -3,8 +3,9 @@ import { z } from 'zod';
 import { prisma } from '../db.js';
 import { AuthRequest } from '../types/index.js';
 import { broadcastToModule } from '../services/notificationService.js';
-import { recordIncome, recordExpense, reverseIncome, reverseExpense } from '../services/balanceService.js';
+import { recordIncome, recordExpense, reverseIncome, reverseExpense, getStoredBalance } from '../services/balanceService.js';
 import { logAudit, extractRequestContext, buildDiff, AuditActorType } from '../services/auditService.js';
+import { activeBranchId } from '../lib/branchScope.js';
 
 const TransactionSchema = z.object({
   type: z.enum(['INCOME', 'EXPENSE']),
@@ -60,6 +61,7 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
       return tx.transaction.create({
         data: {
           tenantId: req.tenantId!,
+          branchId: activeBranchId(),
           type: data.type,
           status: nextStatus as any,
           amount: data.amount as any,
@@ -402,7 +404,7 @@ export const getSummary = async (req: AuthRequest, res: Response) => {
       (prisma as any).invoice.aggregate({ where: { tenantId: req.tenantId!, status: 'PENDING' }, _sum: { total: true } }),
       (prisma as any).invoice.count({ where: { tenantId: req.tenantId!, status: 'APPROVED', updatedAt: { gte: startOfMonth, lte: endOfMonth } } }),
       (prisma as any).invoice.count({ where: { tenantId: req.tenantId!, status: 'REJECTED', updatedAt: { gte: startOfMonth, lte: endOfMonth } } }),
-      (prisma as any).tenantFinanceBalance.findUnique({ where: { tenantId: req.tenantId! } }),
+      getStoredBalance(req.tenantId!),
       (prisma as any).invoice.aggregate({ where: { tenantId: req.tenantId!, status: 'PENDING', type: 'PURCHASE' }, _sum: { total: true } }),
     ]);
     const totalRevenue = income._sum.amount || 0;
@@ -520,9 +522,7 @@ export { listTransactions as listTransactionsController };
 export const getBalance = async (req: AuthRequest, res: Response) => {
   try {
     const tenantId = req.tenantId!;
-    const balance = await (prisma as any).tenantFinanceBalance.findUnique({
-      where: { tenantId },
-    });
+    const balance = await getStoredBalance(tenantId);
 
     const [pendingExpenses, incomeAgg, expenseAgg, approvedPurchaseInvoices] = await Promise.all([
       (prisma as any).invoice.aggregate({

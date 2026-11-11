@@ -1,4 +1,5 @@
 import { prisma } from '../db.js';
+import { currentBranchScope } from '../lib/branchScope.js';
 import { pushToUser, getConnectionsForTenant } from './sseManager.js';
 
 interface SendNotificationParams {
@@ -85,6 +86,7 @@ export async function sendNotification(params: SendNotificationParams) {
     const notification = await prisma.notification.create({
       data: {
         tenantId: params.tenantId,
+        branchId: currentBranchScope()?.branchId ?? null,
         userId: params.userId,
         userType: params.userType,
         type: params.type,
@@ -158,8 +160,20 @@ export async function broadcastToModule(tenantId: string, moduleKey: string, par
     });
 
     const roleIds = rolesWithPermission.map(r => r.id);
+    // Inside a branch, only the people working there (their own branch, or
+    // access to it with a role that reads this module) hear about it.
+    const branchId = currentBranchScope()?.branchId;
     const employees = await prisma.employee.findMany({
-      where: { tenantId, roleId: { in: roleIds }, isActive: true },
+      where: branchId
+        ? {
+            tenantId,
+            isActive: true,
+            OR: [
+              { branchId, roleId: { in: roleIds } },
+              { branchAccess: { some: { branchId, roleId: { in: roleIds } } } },
+            ],
+          }
+        : { tenantId, roleId: { in: roleIds }, isActive: true },
       select: { id: true }
     });
 

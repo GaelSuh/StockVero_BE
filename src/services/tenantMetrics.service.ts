@@ -179,8 +179,9 @@ async function upsertFlow(tenantId: string, from: string, to: string): Promise<n
 
 /**
  * On-hand follows the app's own inventory rule (inventory.items.controller buildBatchCategoryStats):
- * QUANTITY with variants → sum of variant quantities; QUANTITY without → the product's column;
- * SERIALIZED → count of units with stock_status AVAILABLE. Low/out use resolveStockStatus's rule.
+ * QUANTITY with variants → variant quantities plus the product's column (stock not yet shared out);
+ * QUANTITY without → the product's column; SERIALIZED → count of units with stock_status AVAILABLE.
+ * Services (SERVICE) have no stock and are left out. Low/out use resolveStockStatus's rule.
  * Dead stock: on hand > 0 and no stock-log entry and no sale in the 60 days before the day's end.
  */
 async function capturePointInTime(tenantId: string, day: string): Promise<number> {
@@ -190,7 +191,8 @@ async function capturePointInTime(tenantId: string, day: string): Promise<number
     ),
     p AS (
       SELECT id, stock_tracking_mode, quantity_on_hand, cost_price, reorder_threshold
-      FROM inventory_categories WHERE tenant_id = ${tenantId} AND type = 'STOCK'
+      FROM inventory_categories
+      WHERE tenant_id = ${tenantId} AND type = 'STOCK' AND stock_tracking_mode <> 'SERVICE'
     ),
     v AS (
       SELECT category_id, count(*) AS n_all, count(*) FILTER (WHERE is_active) AS n_active,
@@ -211,7 +213,7 @@ async function capturePointInTime(tenantId: string, day: string): Promise<number
     oh AS (
       SELECT p.*,
              CASE
-               WHEN p.stock_tracking_mode = 'QUANTITY' AND coalesce(v.n_all, 0) > 0 THEN v.qty
+               WHEN p.stock_tracking_mode = 'QUANTITY' AND coalesce(v.n_all, 0) > 0 THEN v.qty + coalesce(p.quantity_on_hand, 0)
                WHEN p.stock_tracking_mode = 'QUANTITY' THEN coalesce(p.quantity_on_hand, 0)
                ELSE coalesce(units.avail, 0)
              END AS on_hand,

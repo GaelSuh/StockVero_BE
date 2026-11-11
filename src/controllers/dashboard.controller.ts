@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { prisma } from '../db.js';
 import { AuthRequest } from '../types/index.js';
-import { getAvailableStock } from '../lib/stock.js';
+import { getAvailableStock, isQuantityTracked, quantityLots, stockValueAtPrice, type StockLot } from '../lib/stock.js';
 
 export const getStats = async (req: AuthRequest, res: Response) => {
   try {
@@ -51,7 +51,8 @@ export const getStats = async (req: AuthRequest, res: Response) => {
       inventoryEnabled
         ? (async () => {
             const categories = await (prisma as any).inventoryCategory.findMany({
-              where: { tenantId, reorderThreshold: { gt: 0 } },
+              // Services have no stock, so they are never "low".
+              where: { tenantId, reorderThreshold: { gt: 0 }, stockTrackingMode: { not: 'SERVICE' } },
               select: {
                 id: true,
                 name: true,
@@ -110,34 +111,43 @@ export const getStats = async (req: AuthRequest, res: Response) => {
         ? (async () => {
             const categories = await (prisma as any).inventoryCategory.findMany({
               where: { tenantId },
-              select: { id: true, type: true, sellingPrice: true, costPrice: true },
+              select: {
+                id: true, type: true, sellingPrice: true, costPrice: true,
+                stockTrackingMode: true, quantityOnHand: true,
+                variants: { select: { id: true, priceOverride: true, quantityOnHand: true } },
+              },
             });
             if (categories.length === 0) return 0;
 
             const categoryIds = categories.map((c: any) => c.id);
-            // Two groupBy queries instead of N individual counts
+            // Available serialized units per product and variant, in one query
+            // each for products (stockStatus) and assets (inventoryStatus).
             const [stockAvail, invAvail] = await Promise.all([
               (prisma as any).productItem.groupBy({
-                by: ['categoryId'],
+                by: ['categoryId', 'variantId'],
                 where: { tenantId, categoryId: { in: categoryIds }, stockStatus: 'AVAILABLE' },
                 _count: { id: true },
               }),
               (prisma as any).productItem.groupBy({
-                by: ['categoryId'],
+                by: ['categoryId', 'variantId'],
                 where: { tenantId, categoryId: { in: categoryIds }, inventoryStatus: 'AVAILABLE' },
                 _count: { id: true },
               }),
             ]);
 
-            const countMap: Record<string, number> = {};
-            for (const g of stockAvail) countMap[g.categoryId] = g._count.id;
-            for (const g of invAvail) countMap[g.categoryId] = g._count.id;
+            const unitLots = new Map<string, StockLot[]>();
+            for (const g of [...stockAvail, ...invAvail]) {
+              const lots = unitLots.get(g.categoryId) ?? [];
+              lots.push({ variantId: g.variantId ?? null, quantity: g._count.id });
+              unitLots.set(g.categoryId, lots);
+            }
 
+            // Quantity products count their quantities (they have no unit rows),
+            // and every unit is valued at its variant's own price when it has one.
             let total = 0;
             for (const cat of categories) {
-              const count = countMap[cat.id] ?? 0;
-              const unitPrice = Number(cat.sellingPrice ?? cat.costPrice ?? 0);
-              total += count * unitPrice;
+              const lots = isQuantityTracked(cat) ? quantityLots(cat) : (unitLots.get(cat.id) ?? []);
+              total += stockValueAtPrice({ sellingPrice: cat.sellingPrice ?? cat.costPrice, variants: cat.variants }, lots);
             }
             return total;
           })()

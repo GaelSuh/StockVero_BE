@@ -1,5 +1,5 @@
 import { prisma } from '../db.js';
-import { isQuantityTracked } from '../lib/stock.js';
+import { isQuantityTracked, isService } from '../lib/stock.js';
 import { QUANTITY_FIELD, UNIT_STATUS, decrementIfAvailable, type StockCondition } from './stockConditionService.js';
 import { broadcastToModule } from './notificationService.js';
 
@@ -156,7 +156,7 @@ export async function deductStockForSale(
   // Grouped by variantId as well now: a serialized product with variants must
   // never let one variant's units be counted as another's.
   const serializedIds = categories
-    .filter((c: any) => !isQuantityTracked(c))
+    .filter((c: any) => !isQuantityTracked(c) && !isService(c))
     .map((c: any) => c.id);
   const availableCounts = serializedIds.length
     ? await (tx as any).productItem.groupBy({
@@ -193,7 +193,8 @@ export async function deductStockForSale(
   const insufficient: Array<{ productName: string; requested: number; available: number }> = [];
   for (const item of items) {
     const category = byId.get(item.categoryId);
-    if (!category) continue;
+    // A service has no stock to check or take.
+    if (!category || isService(category)) continue;
     const key = stockKey(item.categoryId, item.variantId);
     const available = remaining.get(key) ?? 0;
     if (item.quantity > available) {
@@ -209,7 +210,7 @@ export async function deductStockForSale(
   for (let idx = 0; idx < items.length; idx++) {
     const item = items[idx];
     const category = byId.get(item.categoryId);
-    if (!category) continue;
+    if (!category || isService(category)) continue;
 
     const quantityTracked = isQuantityTracked(category);
     const key = stockKey(item.categoryId, item.variantId);
@@ -405,7 +406,8 @@ export async function restoreStockForReturn(
       where: { id: item.categoryId },
       select: { id: true, quantityOnHand: true, stockTrackingMode: true },
     });
-    if (!category) continue;
+    // Nothing to put back for a service.
+    if (!category || isService(category)) continue;
 
     const quantityTracked = isQuantityTracked(category);
 
@@ -534,6 +536,8 @@ export async function validateStockAvailability(
     select: { quantityOnHand: true, stockTrackingMode: true, tenantId: true },
   });
   if (!category) return { available: false, currentStock: 0 };
+  // A service is always available; it has no stock.
+  if (isService(category)) return { available: true, currentStock: 0 };
 
   if (isQuantityTracked(category)) {
     if (variantId) {

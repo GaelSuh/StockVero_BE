@@ -5,6 +5,7 @@ import { prisma } from '../db.js';
 import { AuthRequest } from '../types/index.js';
 import { logAudit, auditRequest, buildDiff, extractRequestContext, AuditActorType } from '../services/auditService.js';
 import { supabase, STORAGE_BUCKET } from '../lib/storage.js';
+import { activeBranchId } from '../lib/branchScope.js';
 const router = Router();
 router.use(tenantGuard);
 
@@ -101,6 +102,7 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
   const doc = await prisma.document.create({
     data: {
       tenantId,
+      branchId: activeBranchId(),
       sourceModule: sourceModule as any,
       sourceId,
       name: req.file.originalname,
