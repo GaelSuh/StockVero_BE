@@ -10,17 +10,17 @@ export const normalizePersonName = (raw?: string | null): string =>
   (raw ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().replace(/\s+/g, ' ').toLowerCase();
 
 /**
- * Customers the till can match a credit phone against, so it can ask "is this
- * the same person?" before the sale is recorded, even with no connection.
+ * The business's customers, mirrored on the till: matched by phone for a credit
+ * sale ("is this the same person?") and searched by name for the retail
+ * customer field, both even with no connection. Customers without a phone are
+ * included (phoneDigits ""), so they can be found by name.
  */
 export async function listCreditContacts(tenantId: string) {
   const rows = await prisma.customer.findMany({
-    where: { tenantId, phone: { not: null } },
+    where: { tenantId },
     select: { id: true, name: true, phone: true },
   });
-  return rows
-    .map((c) => ({ id: c.id, name: c.name, phoneDigits: normalizePhone(c.phone ?? '') }))
-    .filter((c) => c.phoneDigits);
+  return rows.map((c) => ({ id: c.id, name: c.name, phoneDigits: normalizePhone(c.phone ?? '') }));
 }
 
 /**

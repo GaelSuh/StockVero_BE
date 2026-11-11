@@ -5,6 +5,7 @@ import { logAudit, buildDiff, AuditActorType } from '../services/auditService.js
 import { broadcastToModule } from '../services/notificationService.js';
 import { isUniqueViolationOn } from './inventory.items.controller.js';
 import { checkProductVariantDependencies } from '../services/dependencyCheckService.js';
+import { shareOutStock, VariantQuantityCeilingError } from '../services/variantPool.js';
 
 /**
  * Audit and notification writes go through the global prisma client and take
@@ -14,50 +15,6 @@ import { checkProductVariantDependencies } from '../services/dependencyCheckServ
  */
 function actorTypeFromUser(user: { accountType: string }): AuditActorType {
   return user.accountType === 'owner' ? AuditActorType.OWNER : AuditActorType.EMPLOYEE;
-}
-
-/** Thrown by assertVariantQuantityWithinCeiling; caught to produce a 400. */
-class VariantQuantityCeilingError extends Error {}
-
-/**
- * For a QUANTITY-tracked product, a variant's quantityOnHand is an allocation
- * carved out of the parent product's own quantityOnHand, not a separate count
- * invented for the variant — so the sum across every variant may never exceed
- * it. Restocking the parent (raising its quantityOnHand) is what frees more
- * room to allocate. SERIALIZED products are untouched: their variants carry
- * no meaningful quantityOnHand at all.
- *
- * `requestedQuantity` is the quantity this create/update is asking for;
- * `excludeVariantId` leaves the variant being edited out of the "already
- * allocated" sum so it isn't double-counted against itself.
- */
-async function assertVariantQuantityWithinCeiling(
-  tx: any,
-  tenantId: string,
-  category: { id: string; quantityOnHand: number; stockTrackingMode: string },
-  requestedQuantity: number,
-  excludeVariantId?: string,
-): Promise<void> {
-  if (category.stockTrackingMode !== 'QUANTITY') return;
-
-  const others = await tx.productVariant.aggregate({
-    where: {
-      tenantId,
-      categoryId: category.id,
-      ...(excludeVariantId ? { id: { not: excludeVariantId } } : {}),
-    },
-    _sum: { quantityOnHand: true },
-  });
-  const allocated: number = others._sum.quantityOnHand ?? 0;
-
-  if (allocated + requestedQuantity > category.quantityOnHand) {
-    const room = Math.max(category.quantityOnHand - allocated, 0);
-    throw new VariantQuantityCeilingError(
-      `Only ${room} unit(s) can be allocated to variants right now — ${allocated} of the ` +
-        `${category.quantityOnHand} in stock ${allocated === 1 ? 'is' : 'are'} already assigned to other ` +
-        `variants. Restock the product to free up more, or lower this quantity.`,
-    );
-  }
 }
 
 /**
@@ -192,7 +149,8 @@ export const createVariant = async (req: AuthRequest, res: Response) => {
     const requestedQty = category.stockTrackingMode === 'QUANTITY' ? Number(quantityOnHand ?? 0) : 0;
 
     const variant = await prisma.$transaction(async (tx: any) => {
-      await assertVariantQuantityWithinCeiling(tx, tenantId, category, requestedQty);
+      // The opening quantity comes out of the stock not yet shared out.
+      await shareOutStock(tx, tenantId, category, requestedQty);
       const { label, axisOrder } = await buildVariantLabel(tx, tenantId, categoryId, attributes);
       return tx.productVariant.create({
         data: {
@@ -334,7 +292,7 @@ export const generateVariants = async (req: AuthRequest, res: Response) => {
     const axisOrder = axes.map((a) => a.name);
     const combinations = buildCombinations(axes);
 
-    // Only meaningful for QUANTITY products — see assertVariantQuantityWithinCeiling.
+    // Only meaningful for QUANTITY products — see shareOutStock.
     const startingQty = category.stockTrackingMode === 'QUANTITY' ? Number(quantityOnHand ?? 0) : 0;
 
     const result = await prisma.$transaction(async (tx: any) => {
@@ -353,10 +311,10 @@ export const generateVariants = async (req: AuthRequest, res: Response) => {
 
       const toCreate = combinations.filter((c) => !taken.has(combinationKey(c)));
 
-      // The whole batch's stock request, checked against the ceiling in one
-      // call rather than per row — a batch either all fits or none of it does.
+      // The whole batch's stock comes out of the pool in one step — a batch
+      // either all fits or none of it does.
       if (toCreate.length > 0 && startingQty > 0) {
-        await assertVariantQuantityWithinCeiling(tx, tenantId, category, startingQty * toCreate.length);
+        await shareOutStock(tx, tenantId, category, startingQty * toCreate.length);
       }
 
       if (toCreate.length > 0) {
@@ -643,12 +601,17 @@ export const updateVariant = async (req: AuthRequest, res: Response) => {
         ? await buildVariantLabel(tx, tenantId, existing.categoryId, nextAttributes, existing.id)
         : { label: existing.label, axisOrder: existing.axisOrder };
 
-      // Restocking a variant (or correcting a mis-typed opening quantity) —
-      // only ever meaningful for QUANTITY products, same rule as creation.
+      // Changing a variant's quantity moves the difference between it and the
+      // stock not yet shared out — only for QUANTITY products. Read inside the
+      // transaction, so a sale made meanwhile is not overwritten.
       let nextQuantity = existing.quantityOnHand;
       if (quantityOnHand !== undefined && category?.stockTrackingMode === 'QUANTITY') {
-        nextQuantity = Number(quantityOnHand) || 0;
-        await assertVariantQuantityWithinCeiling(tx, tenantId, category, nextQuantity, existing.id);
+        const current = await tx.productVariant.findUnique({
+          where: { id: existing.id },
+          select: { quantityOnHand: true },
+        });
+        nextQuantity = Math.max(0, Number(quantityOnHand) || 0);
+        await shareOutStock(tx, tenantId, category, nextQuantity - (current?.quantityOnHand ?? 0));
       }
 
       return tx.productVariant.update({
@@ -780,9 +743,15 @@ export const deleteVariant = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    await prisma.productVariant.delete({ where: { id: variant.id } });
-
-    const parent = await prisma.inventoryCategory.findUnique({ where: { id: variant.categoryId }, select: { name: true } });
+    const parent = await prisma.inventoryCategory.findUnique({
+      where: { id: variant.categoryId },
+      select: { id: true, name: true, stockTrackingMode: true },
+    });
+    // Its stock goes back to the product's not-yet-shared-out pool, not into thin air.
+    await prisma.$transaction(async (tx: any) => {
+      if (parent) await shareOutStock(tx, tenantId, parent, -(variant.quantityOnHand ?? 0));
+      await tx.productVariant.delete({ where: { id: variant.id } });
+    });
     await logAudit({
       tenantId,
       actorType: actorTypeFromUser(user),

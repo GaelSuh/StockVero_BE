@@ -56,6 +56,15 @@ export async function createSale(req: AuthRequest, res: Response) {
       });
     }
 
+    // The customer has to be one of this business's own: an id is all the
+    // request carries, and a sale must never be attached to another tenant's.
+    if (customerId) {
+      const owned = await prisma.customer.findFirst({ where: { id: customerId, tenantId }, select: { id: true } });
+      if (!owned) {
+        return res.status(400).json({ success: false, message: 'That customer was not found.' });
+      }
+    }
+
     // Checked here rather than left to Prisma: an unknown enum member aborts the
     // transaction with a validation error that reaches the till as a bare 500,
     // which is how "MOBILE_MONEY" and "CREDIT" both went unnoticed.
@@ -112,7 +121,15 @@ export async function createSale(req: AuthRequest, res: Response) {
       }));
       // tx, not the global client — this read is now part of the same
       // transaction as the writes below it.
-      const resolvedPrices = await resolvePricesForSale(tenantId, customerId || null, priceLines, tx);
+      // A customer's negotiated price list is a wholesale arrangement. A retail
+      // sale linked to a known customer still sells at counter prices, the same
+      // prices the till showed.
+      const resolvedPrices = await resolvePricesForSale(
+        tenantId,
+        mode === 'WHOLESALE' ? customerId || null : null,
+        priceLines,
+        tx,
+      );
 
       // An offline-synced sale already happened before this request existed:
       // cash changed hands and a receipt printed at whatever price the device
