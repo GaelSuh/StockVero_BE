@@ -12,29 +12,6 @@ export interface TenantSettings {
    * that relied on it before this default changed was backfilled explicitly.
    */
   stockApprovalRequired?: boolean;
-  /** How receipts, invoices and PDF reports look: set in Settings → Company. */
-  documents?: DocumentSettings;
-}
-
-/**
- * The company's document format. Every field is optional; documents fall back
- * to the company name and logo, StockVero's colours and the default font.
- * A branch's own address and phone, when set, are printed instead of these.
- */
-export interface DocumentSettings {
-  /** A full-width letterhead image printed at the top instead of the logo and name. */
-  letterheadUrl?: string | null;
-  address?: string;
-  phone?: string;
-  /** NIU (tax identification number). */
-  taxId?: string;
-  footerText?: string;
-  /** Header band colour, #rrggbb. Dark enough for white text (checked in the app). */
-  headerColor?: string;
-  font?: 'roboto' | 'times' | 'courier';
-  fontSize?: 'small' | 'normal' | 'large';
-  /** Decorative divider lines between sections. Absent means shown. */
-  dividers?: boolean;
 }
 
 export const readTenantSettings = (tenant: { settingsConfig?: unknown } | null): TenantSettings => {

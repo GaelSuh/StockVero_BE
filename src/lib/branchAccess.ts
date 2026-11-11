@@ -11,13 +11,8 @@ export const ALL_BRANCHES = 'all';
 /** Header the client sends to pin a request to a branch (offline replays use it). */
 export const BRANCH_HEADER = 'x-branch-id';
 
-// address and phone ride along so documents (receipts, invoices) can print
-// the issuing branch's own details.
-const summarySelect = { id: true, name: true, code: true, isMain: true, isActive: true, address: true, phone: true } as const;
-export type BranchSummary = {
-  id: string; name: string; code: string; isMain: boolean; isActive: boolean;
-  address: string | null; phone: string | null;
-};
+const summarySelect = { id: true, name: true, code: true, isMain: true, isActive: true } as const;
+export type BranchSummary = { id: string; name: string; code: string; isMain: boolean; isActive: boolean };
 
 /**
  * The branch to keep in a token re-issued during a session (profile update,
