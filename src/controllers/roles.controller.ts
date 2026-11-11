@@ -2,6 +2,29 @@ import { Response } from 'express';
 import { z } from 'zod';
 import { prisma } from '../db.js';
 import { AuthRequest } from '../types/index.js';
+import { ApiError } from '../lib/errors.js';
+import { roleScope, assertWithinCeiling, isOwner } from '../lib/branchAdmin.js';
+
+/** Company roles belong to the owner; a branch admin edits only their branch's roles. */
+function assertRoleEditable(req: AuthRequest, role: { branchId: string | null }) {
+  if (isOwner(req)) return;
+  if (!role.branchId || role.branchId !== req.branchId) {
+    throw new ApiError(403, 'Only the owner can change company roles.', 'ROLE_NOT_EDITABLE');
+  }
+}
+
+/** Where a new role lives: owners choose (company or a branch); branch admins get their branch. */
+async function roleBranchFor(req: AuthRequest, requested: string | null | undefined): Promise<string | null> {
+  if (!isOwner(req)) {
+    if (!req.branchId) throw new ApiError(409, 'Choose a branch first.', 'BRANCH_REQUIRED');
+    return req.branchId;
+  }
+  if (!requested) return null;
+  const branch = await prisma.branch.findFirst({ where: { id: requested, tenantId: req.tenantId! }, select: { id: true } });
+  if (!branch) throw new ApiError(404, 'Branch not found.', 'BRANCH_NOT_FOUND');
+  return branch.id;
+}
+
 import { broadcastToModule } from '../services/notificationService.js';
 import { logAudit, extractRequestContext, AuditActorType } from '../services/auditService.js';
 
@@ -20,6 +43,11 @@ const RoleSchema = z.object({
   isDefault: z.boolean().optional(),
   isAdmin: z.boolean().optional(),
   permissions: z.array(PermissionSchema),
+  /**
+   * Owners only: null/absent = a company role, set = a role for that branch.
+   * Branch admins always create roles for their own branch.
+   */
+  branchId: z.string().uuid().nullable().optional(),
 });
 
 async function getEnabledModuleKeys(tenantId: string) {
@@ -44,9 +72,14 @@ function validatePermissions(permissions: any[], enabledModules: string[]) {
 
 export const listRoles = async (req: AuthRequest, res: Response) => {
   try {
+    // Owners can list the roles usable in a given branch (company + that branch's).
+    const forBranch = isOwner(req) && typeof req.query.branchId === 'string' ? req.query.branchId : null;
     const roles = await prisma.role.findMany({
-      where: { tenantId: req.tenantId! },
+      where: forBranch
+        ? { tenantId: req.tenantId!, OR: [{ branchId: null }, { branchId: forBranch }] }
+        : roleScope(req),
       include: {
+        branch: { select: { id: true, name: true, code: true } },
         permissions: true,
         _count: { select: { employees: true } },
       },
@@ -64,6 +97,7 @@ export const listRoles = async (req: AuthRequest, res: Response) => {
       data,
     });
   } catch (error) {
+    if (error instanceof ApiError) return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
     console.error('Error listing roles:', error);
     return res.status(500).json({
       success: false,
@@ -76,8 +110,9 @@ export const listRoles = async (req: AuthRequest, res: Response) => {
 export const getRole = async (req: AuthRequest, res: Response) => {
   try {
     const role = await prisma.role.findFirst({
-      where: { id: req.params.id, tenantId: req.tenantId! },
+      where: { id: req.params.id, ...roleScope(req) },
       include: {
+        branch: { select: { id: true, name: true, code: true } },
         permissions: true,
         employees: { select: { id: true, firstName: true, lastName: true } },
       },
@@ -96,6 +131,7 @@ export const getRole = async (req: AuthRequest, res: Response) => {
       data: role,
     });
   } catch (error) {
+    if (error instanceof ApiError) return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
     console.error('Error fetching role:', error);
     return res.status(500).json({
       success: false,
@@ -138,8 +174,13 @@ export const createRole = async (req: AuthRequest, res: Response) => {
       });
     }
 
+    assertWithinCeiling(req, payload.permissions);
+    const roleBranchId = await roleBranchFor(req, payload.branchId);
+    // The default role is a company-wide setting.
+    const isDefault = isOwner(req) ? payload.isDefault ?? false : false;
+
     const role = await prisma.$transaction(async (tx) => {
-      if (payload.isDefault) {
+      if (isDefault) {
         await tx.role.updateMany({
           where: { tenantId: req.tenantId!, isDefault: true },
           data: { isDefault: false },
@@ -149,10 +190,11 @@ export const createRole = async (req: AuthRequest, res: Response) => {
       return tx.role.create({
         data: {
           tenantId: req.tenantId!,
+          branchId: roleBranchId,
           name: payload.name.trim(),
           abbreviation: payload.abbreviation.toUpperCase().trim(),
           description: payload.description?.trim() || null,
-          isDefault: payload.isDefault ?? false,
+          isDefault,
           isAdmin: payload.isAdmin ?? false,
           permissions: {
             create: payload.permissions.map((perm) => ({
@@ -194,6 +236,7 @@ export const createRole = async (req: AuthRequest, res: Response) => {
       data: role,
     });
   } catch (error) {
+    if (error instanceof ApiError) return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
     console.error('Error creating role:', error);
     return res.status(500).json({
       success: false,
@@ -214,7 +257,7 @@ export const updateRole = async (req: AuthRequest, res: Response) => {
     }
 
     const existingRole = await prisma.role.findFirst({
-      where: { id: req.params.id, tenantId: req.tenantId! },
+      where: { id: req.params.id, ...roleScope(req) },
     });
     if (!existingRole) {
       return res.status(404).json({
@@ -222,6 +265,8 @@ export const updateRole = async (req: AuthRequest, res: Response) => {
         message: 'Role not found',
       });
     }
+    assertRoleEditable(req, existingRole);
+    assertWithinCeiling(req, parsed.data.permissions);
 
     const duplicate = await prisma.role.findFirst({
       where: {
@@ -247,7 +292,7 @@ export const updateRole = async (req: AuthRequest, res: Response) => {
     }
 
     const role = await prisma.$transaction(async (tx) => {
-      const nextIsDefault = parsed.data.isDefault ?? existingRole.isDefault;
+      const nextIsDefault = isOwner(req) ? parsed.data.isDefault ?? existingRole.isDefault : existingRole.isDefault;
       if (nextIsDefault) {
         await tx.role.updateMany({
           where: { tenantId: req.tenantId!, isDefault: true },
@@ -312,6 +357,7 @@ export const updateRole = async (req: AuthRequest, res: Response) => {
       data: role,
     });
   } catch (error) {
+    if (error instanceof ApiError) return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
     console.error('Error updating role:', error);
     return res.status(500).json({
       success: false,
@@ -324,7 +370,7 @@ export const updateRole = async (req: AuthRequest, res: Response) => {
 export const deleteRole = async (req: AuthRequest, res: Response) => {
   try {
     const role = await prisma.role.findFirst({
-      where: { id: req.params.id, tenantId: req.tenantId! },
+      where: { id: req.params.id, ...roleScope(req) },
     });
     if (!role) {
       return res.status(404).json({
@@ -332,9 +378,14 @@ export const deleteRole = async (req: AuthRequest, res: Response) => {
         message: 'Role not found',
       });
     }
+    assertRoleEditable(req, role);
 
+    // People holding it in another branch count too (BranchAccess rows).
     const employeeCount = await prisma.employee.count({
-      where: { tenantId: req.tenantId!, roleId: req.params.id },
+      where: {
+        tenantId: req.tenantId!,
+        OR: [{ roleId: req.params.id }, { branchAccess: { some: { roleId: req.params.id } } }],
+      },
     });
 
     if (employeeCount > 0) {
@@ -370,6 +421,7 @@ export const deleteRole = async (req: AuthRequest, res: Response) => {
       message: 'Role deleted successfully',
     });
   } catch (error) {
+    if (error instanceof ApiError) return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
     console.error('Error deleting role:', error);
     return res.status(500).json({
       success: false,

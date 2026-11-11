@@ -1,4 +1,10 @@
 import { prisma } from '../db.js';
+import { activeBranchId } from '../lib/branchScope.js';
+
+/** Each branch keeps its own running balance (one cash box per branch). */
+const balanceKey = (tenantId: string) => ({
+  tenantId_branchId: { tenantId, branchId: activeBranchId() },
+});
 
 type PrismaWriteClient =
   | typeof prisma
@@ -17,6 +23,29 @@ export class InsufficientFundsError extends Error {
     );
     this.name = 'InsufficientFundsError';
   }
+}
+
+/**
+ * The stored running balance: the active branch's, or every branch summed in
+ * the All branches view (the branch scope decides which rows are seen).
+ * Null when nothing has been recorded yet.
+ */
+export async function getStoredBalance(tenantId: string): Promise<{
+  totalIncome: number; totalExpense: number; netBalance: number; updatedAt: Date | null;
+} | null> {
+  const agg = await prisma.tenantFinanceBalance.aggregate({
+    where: { tenantId },
+    _sum: { totalIncome: true, totalExpense: true, netBalance: true },
+    _max: { updatedAt: true },
+    _count: true,
+  });
+  if (!agg._count) return null;
+  return {
+    totalIncome: Number(agg._sum.totalIncome ?? 0),
+    totalExpense: Number(agg._sum.totalExpense ?? 0),
+    netBalance: Number(agg._sum.netBalance ?? 0),
+    updatedAt: agg._max.updatedAt,
+  };
 }
 
 export async function getNetBalance(tenantId: string): Promise<number> {
@@ -56,13 +85,14 @@ export async function recordIncome(
   if (amount <= 0) return;
 
   await (tx as any).tenantFinanceBalance.upsert({
-    where: { tenantId },
+    where: balanceKey(tenantId),
     update: {
       totalIncome: { increment: amount },
       netBalance: { increment: amount },
     },
     create: {
       tenantId,
+      branchId: activeBranchId(),
       totalIncome: amount,
       totalExpense: 0,
       netBalance: amount,
@@ -90,13 +120,14 @@ export async function applyExpense(
   if (amount <= 0) return;
 
   await (tx as any).tenantFinanceBalance.upsert({
-    where: { tenantId },
+    where: balanceKey(tenantId),
     update: {
       totalExpense: { increment: amount },
       netBalance: { decrement: amount },
     },
     create: {
       tenantId,
+      branchId: activeBranchId(),
       totalIncome: 0,
       totalExpense: amount,
       netBalance: -amount,
@@ -112,7 +143,7 @@ export async function recordExpense(
   if (amount <= 0) return;
 
   const current = await (tx as any).tenantFinanceBalance.findUnique({
-    where: { tenantId },
+    where: balanceKey(tenantId),
   });
   const currentBalance = Number(current?.netBalance ?? 0);
   if (currentBalance < amount) {
@@ -120,7 +151,7 @@ export async function recordExpense(
   }
 
   await (tx as any).tenantFinanceBalance.update({
-    where: { tenantId },
+    where: balanceKey(tenantId),
     data: {
       totalExpense: { increment: amount },
       netBalance: { decrement: amount },
@@ -136,7 +167,7 @@ export async function reverseExpense(
   if (amount <= 0) return;
 
   await (tx as any).tenantFinanceBalance.update({
-    where: { tenantId },
+    where: balanceKey(tenantId),
     data: {
       totalExpense: { decrement: amount },
       netBalance: { increment: amount },
@@ -152,7 +183,7 @@ export async function reverseIncome(
   if (amount <= 0) return;
 
   await (tx as any).tenantFinanceBalance.update({
-    where: { tenantId },
+    where: balanceKey(tenantId),
     data: {
       totalIncome: { decrement: amount },
       netBalance: { decrement: amount },

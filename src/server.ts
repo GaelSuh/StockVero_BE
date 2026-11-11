@@ -18,6 +18,7 @@ import dashboardRoutes from './routes/dashboard.js';
 import tenantsRoutes from './routes/tenants.js';
 import rolesRoutes from './routes/roles.js';
 import employeesRoutes from './routes/employees.js';
+import branchesRoutes from './routes/branches.js';
 import { swaggerSpec } from './config/swagger.js';
 import adminRoutes from './routes/admin/index.js';
 import analyticsRoutes from './routes/analytics.js';
@@ -60,7 +61,8 @@ app.use(
   cors({
     origin: allowedOrigins,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    // X-Branch-Id pins a request to a branch (offline replays keep their branch).
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Branch-Id'],
     credentials: true,
   }),
 );
@@ -78,6 +80,7 @@ app.use('/api/v1/dashboard', apiLimiter, dashboardRoutes);
 app.use('/api/v1/tenants', apiLimiter, tenantsRoutes);
 app.use('/api/v1/roles', apiLimiter, rolesRoutes);
 app.use('/api/v1/employees', apiLimiter, employeesRoutes);
+app.use('/api/v1/branches', apiLimiter, branchesRoutes);
 app.use('/api/v1/analytics', apiLimiter, analyticsRoutes);
 // [PAYMENT_DISABLED] - Restore when payment integration is ready
 // app.use('/api/v1/billing', apiLimiter, billingRoutes);

@@ -8,6 +8,7 @@ import { sendNotification, broadcastToModule } from '../services/notificationSer
 import { getProjectAccessRecipients } from '../utils/projectRecipients.js';
 import { checkSufficientFunds, recordExpense, reverseExpense, InsufficientFundsError } from '../services/balanceService.js';
 import { logAudit, extractRequestContext, buildDiff, AuditActorType } from '../services/auditService.js';
+import { activeBranchId } from '../lib/branchScope.js';
 
 async function getExistingPendingEntry(
   tenantId: string,
@@ -408,6 +409,7 @@ export const createProject = async (req: AuthRequest, res: Response) => {
     const project = await prisma.project.create({
       data: {
         tenantId: req.tenantId!,
+        branchId: activeBranchId(),
         customerId: payload.customerId,
         name: payload.name,
         description: payload.description,
@@ -421,6 +423,7 @@ export const createProject = async (req: AuthRequest, res: Response) => {
         milestones: {
           create: (payload.milestones || []).map((m, i) => ({
             tenantId: req.tenantId!,
+            branchId: activeBranchId(),
             name: m.name,
             status: (m.status as any) || 'PENDING',
             progress: m.progress || 0,
@@ -433,6 +436,7 @@ export const createProject = async (req: AuthRequest, res: Response) => {
         materials: {
           create: (payload.materials || []).map(m => ({
             tenantId: req.tenantId!,
+            branchId: activeBranchId(),
             productId: m.productId,
             itemSku: m.itemSku ? m.itemSku.toUpperCase() : undefined,
             name: m.name,
@@ -519,6 +523,7 @@ export const createProject = async (req: AuthRequest, res: Response) => {
         prisma.projectAssignment.create({
           data: {
             tenantId: req.tenantId!,
+            branchId: activeBranchId(),
             projectId: project.id,
             employeeId: techEmployee.id,
             role: 'TECHNICIAN',
@@ -844,6 +849,7 @@ export const updateProject = async (req: AuthRequest, res: Response) => {
           update: { role: 'TECHNICIAN' },
           create: {
             tenantId: req.tenantId!,
+            branchId: activeBranchId(),
             projectId: project.id,
             employeeId: techEmployee.id,
             role: 'TECHNICIAN',
@@ -1072,6 +1078,7 @@ export const createMilestone = async (req: AuthRequest, res: Response) => {
     const milestone = await prisma.projectMilestone.create({
       data: {
         tenantId: req.tenantId!,
+        branchId: activeBranchId(),
         projectId: req.params.id,
         name: parsed.data.name,
         status: (parsed.data.status as any) || 'PENDING',
@@ -1397,6 +1404,7 @@ export const addMaterial = async (req: AuthRequest, res: Response) => {
         const material = await tx.projectMaterial.create({
           data: {
             tenantId: req.tenantId!,
+            branchId: activeBranchId(),
             projectId: req.params.id,
             categoryId: data.categoryId,
             sourceType: catType,
@@ -1509,6 +1517,7 @@ export const addMaterial = async (req: AuthRequest, res: Response) => {
       const material = await tx.projectMaterial.create({
         data: {
           tenantId: req.tenantId!,
+          branchId: activeBranchId(),
           projectId: req.params.id,
           productId: data.productId ?? undefined,
           itemSku: data.itemSku ? data.itemSku.toUpperCase() : product?.sku ?? undefined,
@@ -1541,6 +1550,7 @@ export const addMaterial = async (req: AuthRequest, res: Response) => {
         await tx.stockMovement.create({
           data: {
             tenantId: req.tenantId!,
+            branchId: activeBranchId(),
             productId: product.id,
             projectId: project.id,
             projectMaterialId: material.id,
@@ -1758,6 +1768,7 @@ export const updateMaterial = async (req: AuthRequest, res: Response) => {
           await tx.stockMovement.create({
             data: {
               tenantId: req.tenantId!,
+              branchId: activeBranchId(),
               productId: product.id,
               projectId: project.id,
               projectMaterialId: material.id,
@@ -1977,6 +1988,7 @@ export const deleteMaterial = async (req: AuthRequest, res: Response) => {
         await tx.stockMovement.create({
           data: {
             tenantId: req.tenantId!,
+            branchId: activeBranchId(),
             productId: product.id,
             projectId: project.id,
             projectMaterialId: material.id,
@@ -2234,6 +2246,7 @@ export const createAssignment = async (req: AuthRequest, res: Response) => {
     const assignment = await prisma.projectAssignment.create({
       data: {
         tenantId: req.tenantId!,
+        branchId: activeBranchId(),
         projectId: id,
         employeeId,
         role: role || 'TECHNICIAN',
@@ -2363,6 +2376,7 @@ export const addProjectExpense = async (req: AuthRequest, res: Response) => {
       const transaction = await tx.transaction.create({
         data: {
           tenantId: req.tenantId!,
+          branchId: activeBranchId(),
           type: 'EXPENSE',
           status: 'ACCEPTED',
           amount: amount as any,

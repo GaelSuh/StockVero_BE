@@ -12,6 +12,8 @@ export interface JWTPayload {
   userId?: string;
   tenantId?: string;
   tenantSlug?: string;
+  /** Active branch id, or 'all' for the owner's All branches view. Absent in tokens issued before branches: treated as the main / home branch. */
+  branchId?: string;
   accountType?: 'owner' | 'employee';
   active_modules?: string[];
   role?: UserRole;
@@ -45,6 +47,8 @@ export interface AuthRequest extends Request<Record<string, string>> {
     isAdmin?: boolean;
   };
   tenantId?: string;
+  /** The branch this request works in; null = All branches (read-only). Set by tenantGuard. */
+  branchId?: string | null;
   activeModules?: string[];
   permissions?: Record<string, Permission>;
   mustChangePassword?: boolean;
