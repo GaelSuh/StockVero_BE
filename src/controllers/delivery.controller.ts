@@ -8,14 +8,36 @@ import { activeBranchId } from '../lib/branchScope.js';
 export async function createDeliveryNote(req: AuthRequest, res: Response) {
   try {
     const tenantId = req.tenantId!;
-    const { saleId, items, driverName, vehicleInfo, notes } = req.body;
+    const { saleId, items, driverName, driverPhone, vehicleInfo, deliveryAddress, deliveryDate, notes } = req.body;
 
-    if (!saleId || !items?.length) {
+    if (!saleId || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ success: false, message: 'saleId and items are required' });
     }
 
-    const sale = await prisma.sale.findFirst({ where: { id: saleId, tenantId } });
+    const sale = await prisma.sale.findFirst({
+      where: { id: saleId, tenantId },
+      include: { items: { select: { id: true, quantity: true } } },
+    });
     if (!sale) return res.status(404).json({ success: false, message: 'Sale not found' });
+
+    // Every line must be a line of this sale, shipped in a whole positive
+    // quantity no larger than what was sold.
+    const soldQty = new Map(sale.items.map((i: any) => [i.id, i.quantity]));
+    for (const item of items) {
+      const sold = soldQty.get(item?.saleItemId);
+      const qty = Number(item?.quantityShipped);
+      if (sold === undefined) {
+        return res.status(400).json({ success: false, message: 'An item is not part of this sale.' });
+      }
+      if (!Number.isInteger(qty) || qty < 1 || qty > sold) {
+        return res.status(400).json({ success: false, message: 'Each quantity must be between 1 and the quantity sold.' });
+      }
+    }
+
+    const parsedDate = deliveryDate ? new Date(deliveryDate) : null;
+    if (parsedDate && Number.isNaN(parsedDate.getTime())) {
+      return res.status(400).json({ success: false, message: 'Invalid delivery date' });
+    }
 
     const noteNumber = await getNextDeliveryNoteNumber(tenantId);
 
@@ -27,12 +49,15 @@ export async function createDeliveryNote(req: AuthRequest, res: Response) {
         noteNumber,
         status: 'PENDING',
         driverName: driverName || null,
+        driverPhone: driverPhone || null,
         vehicleInfo: vehicleInfo || null,
+        deliveryAddress: deliveryAddress || null,
+        deliveryDate: parsedDate,
         notes: notes || null,
         items: {
           create: items.map((item: any) => ({
             saleItemId: item.saleItemId,
-            quantityShipped: item.quantityShipped,
+            quantityShipped: Number(item.quantityShipped),
           })),
         },
       },
@@ -45,7 +70,7 @@ export async function createDeliveryNote(req: AuthRequest, res: Response) {
       entityType: 'Sale',
       entityId: saleId,
       entityLabel: `#${sale.saleNumber} · ${noteNumber}`,
-      details: { noteNumber, driverName: driverName || null, vehicleInfo: vehicleInfo || null, lines: items.length },
+      details: { noteNumber, driverName: driverName || null, vehicleInfo: vehicleInfo || null, deliveryAddress: deliveryAddress || null, lines: items.length },
     });
 
     return res.status(201).json({ success: true, message: 'Delivery note created', data: deliveryNote });
@@ -61,10 +86,20 @@ export async function listDeliveryNotes(req: AuthRequest, res: Response) {
     const limit = parseInt(req.query.limit as string) || 20;
     const status = req.query.status as string | undefined;
     const saleId = req.query.saleId as string | undefined;
+    const search = (req.query.search as string | undefined)?.trim();
 
     const where: any = { tenantId };
     if (status) where.status = status;
     if (saleId) where.saleId = saleId;
+    // Note number, sale number or customer name.
+    if (search) {
+      where.OR = [
+        { noteNumber: { contains: search, mode: 'insensitive' } },
+        { sale: { saleNumber: { contains: search, mode: 'insensitive' } } },
+        { sale: { customer: { name: { contains: search, mode: 'insensitive' } } } },
+        { sale: { customerName: { contains: search, mode: 'insensitive' } } },
+      ];
+    }
 
     const [notes, total] = await Promise.all([
       prisma.deliveryNote.findMany({
@@ -92,12 +127,31 @@ export async function getDeliveryNote(req: AuthRequest, res: Response) {
     const note = await prisma.deliveryNote.findFirst({
       where: { id: req.params.id, tenantId: req.tenantId! },
       include: {
-        sale: { select: { saleNumber: true, customer: true } },
+        sale: {
+          select: {
+            saleNumber: true,
+            customerName: true,
+            customer: true,
+            items: { select: { id: true, productName: true, variantLabel: true, quantity: true } },
+          },
+        },
         items: true,
       },
     });
     if (!note) return res.status(404).json({ success: false, message: 'Delivery note not found' });
-    return res.json({ success: true, data: note });
+    // Each delivered line carries the product it ships (delivery items only
+    // store the sale line's id).
+    const saleLines = new Map(note.sale.items.map((l: any) => [l.id, l]));
+    const items = note.items.map((item: any) => {
+      const line: any = saleLines.get(item.saleItemId);
+      return {
+        ...item,
+        productName: line ? (line.variantLabel ? `${line.productName} (${line.variantLabel})` : line.productName) : null,
+        quantitySold: line?.quantity ?? null,
+      };
+    });
+    const { items: _saleItems, ...sale } = note.sale as any;
+    return res.json({ success: true, data: { ...note, sale, items } });
   } catch (error) {
     return res.status(500).json({ success: false, message: 'Failed to get delivery note' });
   }
@@ -123,12 +177,16 @@ export async function updateDeliveryNoteStatus(req: AuthRequest, res: Response) 
       data: updateData,
     });
 
+    if (Array.isArray(items) && items.some((i: any) => !Number.isInteger(Number(i?.quantityReceived)) || Number(i?.quantityReceived) < 0)) {
+      return res.status(400).json({ success: false, message: 'Received quantities must be whole numbers, zero or more.' });
+    }
+
     if (items?.length && (status === 'DELIVERED' || status === 'PARTIAL_DELIVERY')) {
       for (const item of items) {
         // Scoped to this note, so an item id from another tenant's note cannot be written.
         await prisma.deliveryNoteItem.updateMany({
           where: { id: item.id, deliveryNoteId: existing.id },
-          data: { quantityReceived: item.quantityReceived },
+          data: { quantityReceived: Number(item.quantityReceived) },
         });
       }
     }

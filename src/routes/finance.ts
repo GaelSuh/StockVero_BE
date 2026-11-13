@@ -209,6 +209,9 @@ router.post('/transactions', permissionGuard('finance', 'canCreate'), createTran
  *       200:
  *         description: Transaction detail
  */
+// Before /transactions/:id, or "available-for-linking" is taken for an id and
+// answers 404 (every instalment approval dialog listed nothing).
+router.get('/transactions/available-for-linking', permissionGuard('finance', 'canRead'), getAvailableTransactionsForLinking);
 router.get('/transactions/:id', permissionGuard('finance', 'canRead'), getTransaction);
 
 /**
@@ -291,7 +294,6 @@ router.delete('/transactions/:id', permissionGuard('finance', 'canDelete'), asyn
  */
 router.get('/summary', permissionGuard('finance', 'canRead'), getSummary);
 router.get('/balance', permissionGuard('finance', 'canRead'), getBalance);
-router.get('/transactions/available-for-linking', permissionGuard('finance', 'canRead'), getAvailableTransactionsForLinking);
 
 // NOTE: Finance queue routes removed — replaced by /api/v1/invoices
 

@@ -17,7 +17,29 @@ const TransactionSchema = z.object({
   entityId: z.string().optional(),
   recordedAt: z.string().datetime().optional(),
   status: z.enum(['PENDING', 'ACCEPTED', 'REJECTED']).optional(),
+  /** Free text kept with the transaction; "" clears it on edit. */
+  notes: z.string().max(2000).optional(),
 });
+
+/**
+ * The project or customer a manual transaction is recorded against, as real
+ * columns: what linking an instalment, the project budget and the details
+ * cards all read. The app sends the link as moduleRef ("projects" or "crm")
+ * plus entityId; the entity must belong to this tenant.
+ */
+async function linkedEntity(
+  tenantId: string,
+  moduleRef: string | undefined,
+  entityId: string | undefined,
+): Promise<{ projectId: string | null; customerId: string | null } | 'not-found'> {
+  if (!entityId || (moduleRef !== 'projects' && moduleRef !== 'crm')) return { projectId: null, customerId: null };
+  if (moduleRef === 'projects') {
+    const project = await prisma.project.findFirst({ where: { id: entityId, tenantId }, select: { id: true, customerId: true } });
+    return project ? { projectId: project.id, customerId: project.customerId ?? null } : 'not-found';
+  }
+  const customer = await prisma.customer.findFirst({ where: { id: entityId, tenantId }, select: { id: true } });
+  return customer ? { projectId: null, customerId: customer.id } : 'not-found';
+}
 
 /**
  * A transaction cannot predate the tenant it belongs to, and recording one in
@@ -47,6 +69,10 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
     if (dateError) {
       return res.status(400).json({ success: false, message: dateError });
     }
+    const link = await linkedEntity(req.tenantId!, data.moduleRef, data.entityId);
+    if (link === 'not-found') {
+      return res.status(400).json({ success: false, message: 'The linked project or customer was not found' });
+    }
     const isOwner = req.user?.accountType === 'owner';
     const nextStatus = isOwner ? (data.status ?? 'PENDING') : 'PENDING';
     const transaction = await prisma.$transaction(async (tx) => {
@@ -70,6 +96,9 @@ export const createTransaction = async (req: AuthRequest, res: Response) => {
           category: data.category,
           moduleRef: data.moduleRef,
           entityId: data.entityId,
+          projectId: link.projectId,
+          customerId: link.customerId,
+          notes: data.notes?.trim() || null,
           recordedAt,
           isAutomatic: false,
         },
@@ -289,6 +318,13 @@ export const updateTransaction = async (req: AuthRequest, res: Response) => {
     }
     const isOwner = req.user?.accountType === 'owner';
     if (data.status && !isOwner) return res.status(403).json({ success: false, message: 'Only the tenant owner can update transaction status' });
+    // A changed link moves the project/customer columns with it.
+    const relink = data.moduleRef !== undefined || data.entityId !== undefined
+      ? await linkedEntity(req.tenantId!, data.moduleRef ?? existing.moduleRef ?? undefined, data.entityId ?? existing.entityId ?? undefined)
+      : null;
+    if (relink === 'not-found') {
+      return res.status(400).json({ success: false, message: 'The linked project or customer was not found' });
+    }
     const transaction = await prisma.$transaction(async (tx) => {
       const wasAccepted = existing.status === 'ACCEPTED';
       const nextType = data.type ?? existing.type;
@@ -320,6 +356,8 @@ export const updateTransaction = async (req: AuthRequest, res: Response) => {
           amount: data.amount !== undefined ? (data.amount as any) : undefined,
           recordedAt: data.recordedAt ? new Date(data.recordedAt) : undefined,
           status: data.status ? (data.status as any) : undefined,
+          notes: data.notes !== undefined ? data.notes.trim() || null : undefined,
+          ...(relink ? { projectId: relink.projectId, customerId: relink.customerId } : {}),
         },
       });
     });
@@ -585,7 +623,10 @@ export const getAvailableTransactionsForLinking = async (req: AuthRequest, res: 
       tenantId,
       type: 'INCOME',
       status: 'ACCEPTED',
-      invoicePaymentId: null,
+      // Not linked to an invoice payment yet. The link is stored on the
+      // payment (InvoicePayment.transactionId); "invoicePaymentId" is not a
+      // column, and asking for it made this endpoint fail with a 500.
+      invoicePayment: { is: null },
       // A sale's own income is already accounted for by that sale — now that
       // it also carries the customer's id (for the customer's Finance tab),
       // it would otherwise show up here too and could be linked a second

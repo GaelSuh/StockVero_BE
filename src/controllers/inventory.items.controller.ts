@@ -214,7 +214,7 @@ export const ProductItemCreateSchema = z.object({
   notes: z.string().optional(),
   /** Which option of the product this unit is. Absent = the product has no
    * variants, which is every product until one is created for it. */
-  variantId: z.string().optional(),
+  variantId: z.string().nullish(), // null = no variant (the offline queue sends null)
   // Accept any valid status string — validated at runtime against category type
   status: z.string().optional(),
 });
@@ -231,7 +231,7 @@ const ProductItemUpdateSchema = z.object({
    * authorised-quantity cap blocks deleting and re-adding them.
    * Empty string clears it back to un-attributed.
    */
-  variantId: z.string().optional(),
+  variantId: z.string().nullish(), // null = no variant (the offline queue sends null)
   // Accept any string — validated at runtime against category type
   status: z.string().optional(),
   imageUrl: z.string().url().optional().or(z.literal('')),
@@ -1473,7 +1473,7 @@ const RestockRequestSchema = z.object({
   /** Device-generated id for a restock recorded offline; makes the retry safe. */
   offlineId: z.string().optional(),
   /** Which option the stock is for. Absent = the product has no variants. */
-  variantId: z.string().optional(),
+  variantId: z.string().nullish(), // null = no variant (the offline queue sends null)
   quantity: z.coerce.number().int().positive(),
   costPrice: z.coerce.number().nonnegative().optional(),
   plannedDate: z.string().optional(),
