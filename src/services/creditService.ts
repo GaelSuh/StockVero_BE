@@ -1,9 +1,11 @@
 import { prisma } from '../db.js';
 
-export async function getCreditCustomers(tenantId: string) {
+/** Who owes money, from one mode's sales: the retail and wholesale pages each show their own. */
+export async function getCreditCustomers(tenantId: string, mode: 'RETAIL' | 'WHOLESALE') {
   const sales = await prisma.sale.findMany({
     where: {
       tenantId,
+      mode,
       paymentStatus: { in: ['CREDIT', 'PARTIAL'] },
       amountOwed: { gt: 0 },
     },

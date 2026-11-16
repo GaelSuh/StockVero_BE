@@ -6,6 +6,16 @@ import { getNextSaleNumber } from '../services/saleService.js';
 import { recordSaleAsIncome, recordSaleTipAsIncome } from '../services/saleFinanceService.js';
 import { deductStockForSale, validateStockAvailability, InsufficientStockError, notifyLowStock, type LowStockEntry } from '../services/saleInventoryService.js';
 import { resolvePricesForSale } from '../services/priceResolutionService.js';
+
+/** How old an offline sale's device time may be before it's treated as a wrong clock. */
+const OFFLINE_SALE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** A sale line nothing prices; see createSale. */
+class MissingPriceError extends Error {
+  constructor(public products: string[]) {
+    super('Missing selling price');
+  }
+}
 import { costFields, currentUnitCosts } from '../services/saleCostService.js';
 import { auditRequest, AuditStatus } from '../services/auditService.js';
 
@@ -105,6 +115,13 @@ export async function createSale(req: AuthRequest, res: Response) {
       }
     }
 
+    // An offline sale happened when the device recorded it, not when it synced:
+    // dated then, it lands on the right day in the daily summary. A time in the
+    // future or over 30 days old means a wrong device clock, so the server's time is used.
+    const deviceTime = offlineId ? new Date((req.body as any).recordedAt) : null;
+    const age = deviceTime ? Date.now() - deviceTime.getTime() : NaN;
+    const soldAt = age >= 0 && age <= OFFLINE_SALE_MAX_AGE_MS ? deviceTime! : new Date();
+
     // Who sold this, by name — looked up once, before the transaction opens.
     const sellerType: 'OWNER' | 'EMPLOYEE' =
       user.accountType === 'owner' ? 'OWNER' : 'EMPLOYEE';
@@ -144,6 +161,13 @@ export async function createSale(req: AuthRequest, res: Response) {
       // and it stays fully closed here.
       const OFFLINE_PRICE_TOLERANCE = 0.2; // 20% — starting point, tune to the business
 
+      // A line nothing prices (no selling price, variant price or list rule)
+      // is refused online. Offline it already happened, so the device price stands.
+      const unpriced = items.filter((_: any, idx: number) => resolvedPrices[idx].missingPrice);
+      if (unpriced.length && !offlineId) {
+        throw new MissingPriceError(unpriced.map((item: any) => item.productName || item.categoryId));
+      }
+
       const unitCosts = await currentUnitCosts(tx, tenantId, items.map((item: any) => item.categoryId));
 
       let subtotal = 0;
@@ -156,9 +180,11 @@ export async function createSale(req: AuthRequest, res: Response) {
         if (offlineId) {
           const clientPrice = Number(item.unitPrice);
           if (Number.isFinite(clientPrice) && clientPrice >= 0) {
-            const deviation = resolved.unitPrice > 0
-              ? Math.abs(clientPrice - resolved.unitPrice) / resolved.unitPrice
-              : (clientPrice === 0 ? 0 : Infinity);
+            // No server price to compare with: the device's price is the only one there is.
+            const deviation = resolved.missingPrice ? 0
+              : resolved.unitPrice > 0
+                ? Math.abs(clientPrice - resolved.unitPrice) / resolved.unitPrice
+                : (clientPrice === 0 ? 0 : Infinity);
             if (deviation <= OFFLINE_PRICE_TOLERANCE) {
               unitPrice = clientPrice;
             } else {
@@ -257,6 +283,9 @@ export async function createSale(req: AuthRequest, res: Response) {
           tenantId,
           saleNumber,
           offlineId: offlineId ?? null,
+          createdOffline: Boolean(offlineId),
+          syncedAt: offlineId ? new Date() : null,
+          createdAt: soldAt,
           mode,
           status: 'COMPLETED',
           customerId: effectiveCustomerId,
@@ -287,6 +316,7 @@ export async function createSale(req: AuthRequest, res: Response) {
               reference: p.reference || null,
               recordedById: user.id,
               recordedByName: sellerName,
+              paidAt: soldAt,
             })),
           } : undefined,
         },
@@ -331,7 +361,7 @@ export async function createSale(req: AuthRequest, res: Response) {
       // the sale number, which costs one extra update to link them back up.
       const transactionId = await recordSaleAsIncome(tx, createdSale, tenantId);
       await tx.sale.update({ where: { id: createdSale.id }, data: { transactionId } });
-      await recordSaleTipAsIncome(tx, createdSale, tipAmount, tenantId);
+      await recordSaleTipAsIncome(tx, createdSale, tipAmount, tenantId, soldAt);
 
       return { ...createdSale, transactionId };
     },
@@ -369,6 +399,13 @@ export async function createSale(req: AuthRequest, res: Response) {
       data: sale,
     });
   } catch (error) {
+    if (error instanceof MissingPriceError) {
+      return res.status(400).json({
+        success: false,
+        message: `No selling price set for: ${error.products.join(', ')}. Set it on the product before selling.`,
+        conflict: { type: 'MISSING_PRICE', products: error.products },
+      });
+    }
     if (error instanceof InsufficientStockError) {
       auditRequest(req, {
         action: req.body?.mode === 'WHOLESALE' ? 'WHOLESALE_SALE_REFUSED' : 'RETAIL_SALE_REFUSED',
@@ -636,7 +673,8 @@ export async function getDailySalesSummary(req: AuthRequest, res: Response) {
 export async function getCreditCustomersController(req: AuthRequest, res: Response) {
   try {
     const { getCreditCustomers } = await import('../services/creditService.js');
-    const data = await getCreditCustomers(req.tenantId!);
+    // Both routers mount under one base; the path says which page asked.
+    const data = await getCreditCustomers(req.tenantId!, req.originalUrl.includes('/wholesale/') ? 'WHOLESALE' : 'RETAIL');
     return res.json({ success: true, data });
   } catch (error) {
     return res.status(500).json({ success: false, message: 'Failed to get credit customers' });

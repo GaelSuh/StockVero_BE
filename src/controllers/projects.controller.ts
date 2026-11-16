@@ -417,6 +417,7 @@ export const createProject = async (req: AuthRequest, res: Response) => {
         progress: payload.progress || 0,
         budget: payload.budget as any,
         spent: totalSpent as any,
+        spentAmount: totalSpent as any, // both spend columns, so list and details agree
         technician: payload.technician,
         startDate: toDate(payload.startDate),
         dueDate: toDate(payload.dueDate),
@@ -2074,7 +2075,11 @@ export const removeMaterialItem = async (req: AuthRequest, res: Response) => {
     const result = await prisma.$transaction(async (tx) => {
       const material = await tx.projectMaterial.findFirst({
         where: { id: materialId, projectId, tenantId: req.tenantId! },
-        include: { project: { select: { isLocked: true, name: true, spent: true } } },
+        include: {
+          project: {
+            select: { isLocked: true, name: true, spent: true, budget: true, availableBudget: true, spentAmount: true },
+          },
+        },
       }) as any;
       if (!material) throw new ApiError(404, 'Material not found');
       if (material.project.isLocked) throw new ApiError(403, 'This project is locked. No further changes can be made to phases or materials.');
@@ -2110,10 +2115,16 @@ export const removeMaterialItem = async (req: AuthRequest, res: Response) => {
         } as any,
       });
 
-      // Adjust project spent
+      // All three spend columns, as deleting a material does: the list reads
+      // spentAmount and the details page reads spent, so updating one split them.
+      const nextSpentAmount = Math.max(0, getProjectSpentAmount(material.project) - costDiff);
       await tx.project.update({
         where: { id: projectId },
-        data: { spent: (material.project.spent as any).sub ? material.project.spent.sub(costDiff) : (material.project.spent as any) - costDiff },
+        data: {
+          spent: (material.project.spent as any).sub ? material.project.spent.sub(costDiff) : (material.project.spent as any) - costDiff,
+          spentAmount: nextSpentAmount as any,
+          remainingBudget: Math.max(0, getProjectBudgetLimit(material.project) - nextSpentAmount) as any,
+        },
       });
 
       // Fetch remaining assigned items

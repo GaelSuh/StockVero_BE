@@ -14,6 +14,12 @@ export interface ResolvedPrice {
    * without a second DB round trip.
    */
   variantLabel?: string;
+  /**
+   * Nothing priced the line: no price-list rule, no variant price and no
+   * selling price on the product. unitPrice is then 0. The cost price is
+   * never a fallback; selling at cost would hide the missing price.
+   */
+  missingPrice?: boolean;
 }
 
 /** Either the global Prisma client or a `tx` handed in from `prisma.$transaction`. */
@@ -35,12 +41,19 @@ function splitRules<T extends { variantId: string | null }>(rules: T[], variantI
   return { variantRules, productRules };
 }
 
-async function productPrice(client: PrismaLike, categoryId: string): Promise<number> {
+/** The product's own price tier: its selling price, or "missing". */
+function productTier(sellingPrice: unknown, variantLabel?: string): ResolvedPrice {
+  return sellingPrice != null
+    ? { unitPrice: Number(sellingPrice), source: 'PRODUCT', variantLabel }
+    : { unitPrice: 0, source: 'PRODUCT', variantLabel, missingPrice: true };
+}
+
+async function productPrice(client: PrismaLike, categoryId: string, variantLabel?: string) {
   const category = await client.inventoryCategory.findUnique({
     where: { id: categoryId },
-    select: { sellingPrice: true, costPrice: true },
+    select: { sellingPrice: true },
   });
-  return Number(category?.sellingPrice ?? category?.costPrice ?? 0);
+  return productTier(category?.sellingPrice, variantLabel);
 }
 
 async function loadVariant(client: PrismaLike, variantId: string) {
@@ -73,7 +86,7 @@ export async function resolvePriceDetailed(
     if (variant?.priceOverride != null) {
       return { unitPrice: Number(variant.priceOverride), source: 'VARIANT', variantLabel };
     }
-    return { unitPrice: await productPrice(client, categoryId), source: 'PRODUCT', variantLabel };
+    return productPrice(client, categoryId, variantLabel);
   }
 
   if (!customerId) return fallbackPrice();
@@ -199,7 +212,7 @@ export async function resolvePricesForSale(
       : Promise.resolve([]),
     client.inventoryCategory.findMany({
       where: { id: { in: categoryIds } },
-      select: { id: true, sellingPrice: true, costPrice: true },
+      select: { id: true, sellingPrice: true },
     }),
   ]);
 
@@ -209,7 +222,7 @@ export async function resolvePricesForSale(
   const variantById = new Map<string, { id: string; label: string; priceOverride: unknown }>(
     (variants as any[]).map((v) => [v.id, v]),
   );
-  const categoryById = new Map<string, { id: string; sellingPrice: unknown; costPrice: unknown }>(
+  const categoryById = new Map<string, { id: string; sellingPrice: unknown }>(
     (categories as any[]).map((c) => [c.id, c]),
   );
 
@@ -217,13 +230,12 @@ export async function resolvePricesForSale(
     const variant = line.variantId ? variantById.get(line.variantId) : undefined;
     const variantLabel = variant?.label;
     const category = categoryById.get(line.categoryId);
-    const productPriceForLine = Number(category?.sellingPrice ?? category?.costPrice ?? 0);
 
     function fallback(): ResolvedPrice {
       if (variant?.priceOverride != null) {
         return { unitPrice: Number(variant.priceOverride), source: 'VARIANT', variantLabel };
       }
-      return { unitPrice: productPriceForLine, source: 'PRODUCT', variantLabel };
+      return productTier(category?.sellingPrice, variantLabel);
     }
 
     if (!customerId) return fallback();
