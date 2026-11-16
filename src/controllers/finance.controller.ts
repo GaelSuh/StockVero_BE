@@ -356,6 +356,8 @@ export const updateTransaction = async (req: AuthRequest, res: Response) => {
           amount: data.amount !== undefined ? (data.amount as any) : undefined,
           recordedAt: data.recordedAt ? new Date(data.recordedAt) : undefined,
           status: data.status ? (data.status as any) : undefined,
+          // "" clears these (stored as null); undefined leaves them alone.
+          category: data.category !== undefined ? data.category.trim() || null : undefined,
           notes: data.notes !== undefined ? data.notes.trim() || null : undefined,
           ...(relink ? { projectId: relink.projectId, customerId: relink.customerId } : {}),
         },

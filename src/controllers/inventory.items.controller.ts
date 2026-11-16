@@ -46,12 +46,13 @@ export function isUniqueViolationOn(error: unknown, column: string): boolean {
 }
 
 /**
- * A ProductItem carries exactly one of these, depending on its category type.
- * They overlap but are not identical: DEPLOYED is stock-only (also covers a
- * sold unit — there is no separate SOLD status), IN_USE is inventory-only.
+ * A ProductItem carries exactly one of these, depending on its category type:
+ * every value its enum declares, so the list can filter by any of them.
+ * DEPLOYED, IN_TRANSIT and SOLD are stock-only (SOLD on older sold units;
+ * sales now mark DEPLOYED), IN_USE is inventory-only.
  */
 const STOCK_ITEM_STATUSES = new Set([
-  'AVAILABLE', 'DEPLOYED', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD',
+  'AVAILABLE', 'DEPLOYED', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD', 'IN_TRANSIT', 'SOLD',
 ]);
 const INVENTORY_ITEM_STATUSES = new Set([
   'AVAILABLE', 'IN_USE', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD',
@@ -71,6 +72,7 @@ export const fetchCategoryById = (tenantId: string, id: string) =>
 
 const STATUS_AVAILABLE = 'AVAILABLE';
 
+// What a person may set by hand. IN_TRANSIT belongs to transfers and SOLD to sales.
 const STOCK_STATUSES = new Set(['AVAILABLE', 'DEPLOYED', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD']);
 const INVENTORY_STATUSES = new Set(['AVAILABLE', 'IN_USE', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD']);
 
@@ -1845,9 +1847,10 @@ export const updateProductItem = async (req: AuthRequest, res: Response) => {
     const updated = await (prisma as any).productItem.update({
       where: { id: req.params.id },
       data: {
+        // "" clears a field (stored as null); undefined leaves it alone.
         ...(name !== undefined && { name: name.trim() || null }),
-        ...(userIdentifier !== undefined && { userIdentifier }),
-        ...(notes !== undefined && { notes }),
+        ...(userIdentifier !== undefined && { userIdentifier: userIdentifier.trim() || null }),
+        ...(notes !== undefined && { notes: notes.trim() || null }),
         ...(resolvedVariantId !== undefined && { variantId: resolvedVariantId }),
         ...statusUpdate,
         ...(imageUrl !== undefined && { imageUrl: imageUrl || null }),
