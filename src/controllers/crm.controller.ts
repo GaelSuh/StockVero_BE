@@ -383,6 +383,12 @@ export const updateCustomer = async (req: AuthRequest, res: Response) => {
       });
     }
 
+    // The phone can be changed but not erased: it's how the till finds a
+    // returning customer (and the app requires it when creating one).
+    if (parsed.data.phone !== undefined && !parsed.data.phone.trim()) {
+      return res.status(400).json({ success: false, message: 'A phone number is required.' });
+    }
+
     const phoneError = await validateCustomerPhone(req.tenantId!, parsed.data.phone);
     if (phoneError) {
       return res.status(400).json({ success: false, message: phoneError });
@@ -393,7 +399,7 @@ export const updateCustomer = async (req: AuthRequest, res: Response) => {
       data: {
         ...parsed.data,
         email: blankToNull(parsed.data.email),
-        phone: blankToNull(parsed.data.phone),
+        phone: parsed.data.phone?.trim(),
         location: blankToNull(parsed.data.location),
         address: blankToNull(parsed.data.address),
         notes: blankToNull(parsed.data.notes),
