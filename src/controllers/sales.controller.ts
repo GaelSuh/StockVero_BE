@@ -7,6 +7,18 @@ import { recordSaleAsIncome, recordSaleTipAsIncome } from '../services/saleFinan
 import { deductStockForSale, validateStockAvailability, InsufficientStockError, notifyLowStock, type LowStockEntry } from '../services/saleInventoryService.js';
 import { resolvePricesForSale } from '../services/priceResolutionService.js';
 
+/**
+ * Which page asked: retail or wholesale. Both routers mount under /sales, so
+ * the path (/sales/retail…, /sales/wholesale…) says it; an explicit ?mode= wins.
+ * Without this the lists read only ?mode=, which the app never sends, and both
+ * pages showed every sale.
+ */
+function saleModeOf(req: AuthRequest): 'RETAIL' | 'WHOLESALE' {
+  const asked = String(req.query.mode ?? '').toUpperCase();
+  if (asked === 'RETAIL' || asked === 'WHOLESALE') return asked;
+  return /\/sales\/wholesale(?:[/?]|$)/.test(req.originalUrl) ? 'WHOLESALE' : 'RETAIL';
+}
+
 /** How old an offline sale's device time may be before it's treated as a wrong clock. */
 const OFFLINE_SALE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -434,16 +446,19 @@ export async function listSales(req: AuthRequest, res: Response) {
     const tenantId = req.tenantId!;
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 20;
-    const mode = req.query.mode as string | undefined;
+    const mode = saleModeOf(req);
     const status = req.query.status as string | undefined;
+    const paymentStatus = String(req.query.paymentStatus ?? '').toUpperCase();
     const customerId = req.query.customerId as string | undefined;
     const from = req.query.from ? new Date(req.query.from as string) : undefined;
     const to = req.query.to ? new Date(req.query.to as string) : undefined;
     const search = req.query.search as string | undefined;
 
     const where: any = { tenantId };
-    if (mode) where.mode = mode;
+    where.mode = mode;
     if (status) where.status = status;
+    // The list's Paid / Partial / Credit filter (it was sent and ignored).
+    if (['PAID', 'PARTIAL', 'CREDIT', 'REFUNDED'].includes(paymentStatus)) where.paymentStatus = paymentStatus;
     if (customerId) where.customerId = customerId;
     if (from || to) {
       where.createdAt = {};
@@ -654,13 +669,7 @@ export async function getDailySalesSummary(req: AuthRequest, res: Response) {
     // mode — the previous check read it there and always came back false. It
     // also mixed || with ?:, which binds tighter, so any ?mode= at all meant
     // WHOLESALE. Between them, the wholesale page was reporting retail figures.
-    const queryMode = String(req.query.mode ?? '').toUpperCase();
-    const mode =
-      queryMode === 'RETAIL' || queryMode === 'WHOLESALE'
-        ? queryMode
-        : req.originalUrl.includes('/wholesale/')
-          ? 'WHOLESALE'
-          : 'RETAIL';
+    const mode = saleModeOf(req);
 
     const summary = await getDailySummary(req.tenantId!, date, mode);
     return res.json({ success: true, data: summary });
@@ -673,8 +682,7 @@ export async function getDailySalesSummary(req: AuthRequest, res: Response) {
 export async function getCreditCustomersController(req: AuthRequest, res: Response) {
   try {
     const { getCreditCustomers } = await import('../services/creditService.js');
-    // Both routers mount under one base; the path says which page asked.
-    const data = await getCreditCustomers(req.tenantId!, req.originalUrl.includes('/wholesale/') ? 'WHOLESALE' : 'RETAIL');
+    const data = await getCreditCustomers(req.tenantId!, saleModeOf(req));
     return res.json({ success: true, data });
   } catch (error) {
     return res.status(500).json({ success: false, message: 'Failed to get credit customers' });
