@@ -573,6 +573,9 @@ model InventoryCategory {
   plannedQty        Int                @default(0) @map("planned_qty")
   plannedDate       DateTime?          @map("planned_date")
   invoiceApproved   Boolean            @default(false) @map("invoice_approved")
+  /// Serialized products: the units were already owned, not bought. Units added
+  /// book no expense, and no purchase invoice or finance approval is needed.
+  ownedStock        Boolean            @default(false) @map("owned_stock")
   approvedInvoiceId String?            @map("approved_invoice_id")
   reorderThreshold  Int                @default(0) @map("reorder_threshold")
   type              ProductType        @default(STOCK)

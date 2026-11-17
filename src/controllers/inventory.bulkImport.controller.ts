@@ -465,6 +465,8 @@ export const bulkImportProducts = async (req: AuthRequest, res: Response) => {
               // Quantity products hold live stock in quantityOnHand (applied below).
               // Serialised ones keep plannedQty as the quantity to be authorised.
               plannedQty: quantityTracked ? 0 : row.quantity,
+              // "Already have" serialized imports: their units book no expense and need no approval.
+              ownedStock: !quantityTracked && !isNewPurchase,
               reorderThreshold: row.reorderThreshold,
               identifierType: row.barcode ? 'BARCODE' : 'NONE',
               identifierLabel: row.barcode ? 'Barcode' : null,
@@ -519,7 +521,8 @@ export const bulkImportProducts = async (req: AuthRequest, res: Response) => {
 
     // Serialised imports still go through finance: one purchase invoice per product,
     // raised after the batch commits so a finance hiccup cannot roll back the import.
-    if (serializedIds.length > 0 && req.user?.id && (await stockApprovalRequired(tenantId))) {
+    // Not for stock already owned: nothing was bought, so there is nothing to approve.
+    if (serializedIds.length > 0 && isNewPurchase && req.user?.id && (await stockApprovalRequired(tenantId))) {
       for (const categoryId of serializedIds) {
         try {
           await createPurchaseInvoice({ tenantId, categoryId, submittedBy: req.user.id });
