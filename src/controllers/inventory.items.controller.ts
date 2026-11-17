@@ -72,6 +72,15 @@ export const fetchCategoryById = (tenantId: string, id: string) =>
 
 const STATUS_AVAILABLE = 'AVAILABLE';
 
+/**
+ * Do this product's units go through finance (a purchase invoice to approve,
+ * and an expense per unit)? Only when the business turned stock approval on,
+ * and never for stock it already owned (nothing was paid).
+ */
+async function unitsNeedFinance(tenantId: string, category: { ownedStock?: boolean | null }): Promise<boolean> {
+  return !category.ownedStock && (await stockApprovalRequired(tenantId));
+}
+
 // What a person may set by hand. IN_TRANSIT belongs to transfers and SOLD to sales.
 const STOCK_STATUSES = new Set(['AVAILABLE', 'DEPLOYED', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD']);
 const INVENTORY_STATUSES = new Set(['AVAILABLE', 'IN_USE', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD']);
@@ -192,6 +201,11 @@ export const CategorySchema = z.object({
   quantityOnHand: z.coerce.number().int().nonnegative().optional(),
   /** False when recording stock the business already owns — no expense is booked. */
   isNewPurchase: z.boolean().optional(),
+  /**
+   * Serialized products: the units were already owned. Set on create from
+   * isNewPurchase: false, editable afterwards. See unitsNeedFinance.
+   */
+  ownedStock: z.boolean().optional(),
   description: z.string().optional(),
   supplier: z.string().optional(),
   costPrice: z.coerce.number().nonnegative().optional(),
@@ -427,6 +441,8 @@ const formatCategory = (cat: any, stats: CategoryStats) => {
     plannedQty: cat.plannedQty ?? 0,
     plannedDate: cat.plannedDate ?? null,
     invoiceApproved: cat.invoiceApproved ?? false,
+    // Serialized stock already owned: units skip finance (no invoice, no expense).
+    ownedStock: cat.ownedStock ?? false,
     approvedInvoiceId: cat.approvedInvoiceId ?? null,
     reorderThreshold: cat.reorderThreshold,
     identifierType: cat.identifierType,
@@ -864,6 +880,9 @@ export const createCategory = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ success: false, message: CHANNELS_REQUIRED_MESSAGE });
     }
     const quantityTracked = trackingMode === 'QUANTITY';
+    // Serialized stock the business already had: its units book no expense and
+    // need no purchase approval. Chosen once, on the product.
+    const ownedStock = trackingMode === 'SERIALIZED' && (data.ownedStock ?? data.isNewPurchase === false);
 
     const category = await (prisma as any).inventoryCategory.create({
       data: {
@@ -892,6 +911,7 @@ export const createCategory = async (req: AuthRequest, res: Response) => {
         images: data.images ?? [],
         notes: data.notes ?? null,
         invoiceApproved: false,
+        ownedStock,
       },
     });
 
@@ -920,7 +940,7 @@ export const createCategory = async (req: AuthRequest, res: Response) => {
         // next refetch.
         category.quantityOnHand = openingQty;
       }
-    } else if (trackingMode !== 'SERVICE' && submittedBy && (await stockApprovalRequired(tenantId))) {
+    } else if (trackingMode !== 'SERVICE' && submittedBy && (await unitsNeedFinance(tenantId, category))) {
       // Serialised, and this tenant puts stock purchases in front of finance.
       // With the toggle off there is nothing to approve, so raising an invoice
       // would only leave PENDING paperwork nobody ever actions.
@@ -1086,6 +1106,11 @@ export const updateCategory = async (req: AuthRequest, res: Response) => {
         imageUrl: data.imageUrl !== undefined ? (data.imageUrl || null) : undefined,
         images: data.images !== undefined ? data.images : undefined,
         notes: data.notes !== undefined ? data.notes : undefined,
+        // Serialized only; applies to the units added from now on.
+        ownedStock:
+          data.ownedStock !== undefined && (existing.stockTrackingMode ?? 'SERIALIZED') === 'SERIALIZED'
+            ? data.ownedStock
+            : undefined,
       },
      });
      if (!editQuantity) return saved;
@@ -1306,7 +1331,7 @@ export const createProductItem = async (req: AuthRequest, res: Response) => {
 
     // Tenants that do not run stock purchases through finance skip both guards
     // below. Absent setting resolves to true, so existing tenants are unaffected.
-    const requiresApproval = await stockApprovalRequired(tenantId);
+    const requiresApproval = await unitsNeedFinance(tenantId, category);
 
     // Guard: invoice must be approved before any units can be added
     if (requiresApproval && !category.invoiceApproved) {
@@ -1447,7 +1472,8 @@ export const createProductItem = async (req: AuthRequest, res: Response) => {
     });
 
     // Deduct unit cost from the approved purchase invoice and create expense transaction
-    if (userId) {
+    // Units of stock already owned cost nothing today: no expense.
+    if (userId && !category.ownedStock) {
       try {
         await deductUnitCost(item.id, categoryId, tenantId);
       } catch (err) {
@@ -1623,7 +1649,7 @@ export const restockRequest = async (req: AuthRequest, res: Response) => {
 
     // Serialised: raise the authorised quantity, and involve finance only if the
     // tenant asks for it.
-    const needsApproval = await stockApprovalRequired(tenantId);
+    const needsApproval = await unitsNeedFinance(tenantId, category);
 
     // With an invoice, the quota lives on the invoice and starts its own count
     // from zero, so plannedQty is simply the newly authorised amount. Without
