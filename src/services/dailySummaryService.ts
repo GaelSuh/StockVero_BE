@@ -1,4 +1,5 @@
 import { prisma } from '../db.js';
+import { COUNTED_SALE_STATUSES } from './analytics/sales.js';
 import { currentBranchScope } from '../lib/branchScope.js';
 
 /**
@@ -65,7 +66,9 @@ export async function computeDailySummary(
 
   const whereClause: any = {
     tenantId,
-    status: { in: ['COMPLETED', 'PARTIAL'] },
+    // RETURNED included: the refund is subtracted below, so leaving a fully
+    // returned sale out of revenue as well subtracted it twice.
+    status: { in: [...COUNTED_SALE_STATUSES] },
     createdAt: { gte: startOfDay, lte: endOfDay },
   };
   if (mode) whereClause.mode = mode;

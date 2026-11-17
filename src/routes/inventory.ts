@@ -37,6 +37,7 @@ import {
   getCategoryById,
   createCategory,
   updateCategory,
+  getQuantityEditStatus,
   deleteCategory,
   checkCategoryAvailability,
   createProductItem,
@@ -867,6 +868,7 @@ router.post('/categories', permissionGuard('inventory', 'canCreate'), createCate
  *       404:
  *         description: Category not found
  */
+router.get('/categories/:id/quantity-edit', permissionGuard('inventory', 'canRead'), getQuantityEditStatus);
 router.patch('/categories/:id', permissionGuard('inventory', 'canUpdate'), updateCategory);
 
 /**

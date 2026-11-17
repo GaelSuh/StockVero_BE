@@ -20,7 +20,9 @@ router.use(tenantGuard, mustChangePasswordGuard);
 
 // Retail sales routes (guarded by retail_sales module)
 const retailRouter = Router();
-retailRouter.use(moduleGuard('retail_sales'));
+// Scoped to its own path: both routers are mounted on /sales, and an unscoped
+// guard here ran on wholesale requests too, refusing a wholesale-only business.
+retailRouter.use('/retail', moduleGuard('retail_sales'));
 retailRouter.get('/retail', permissionGuard('retail_sales', 'canRead'), listSales);
 retailRouter.get('/retail/lookup/:code', permissionGuard('retail_sales', 'canRead'), lookupRetailSaleByCode);
 retailRouter.get('/retail/:id', permissionGuard('retail_sales', 'canRead'), getSale);
@@ -34,7 +36,7 @@ retailRouter.get('/retail/credit/contacts', permissionGuard('retail_sales', 'can
 
 // Wholesale sales routes (guarded by wholesale_sales module)
 const wholesaleRouter = Router();
-wholesaleRouter.use(moduleGuard('wholesale_sales'));
+wholesaleRouter.use('/wholesale', moduleGuard('wholesale_sales'));
 wholesaleRouter.get('/wholesale', permissionGuard('wholesale_sales', 'canRead'), listSales);
 wholesaleRouter.get('/wholesale/lookup/:code', permissionGuard('wholesale_sales', 'canRead'), lookupWholesaleSaleByCode);
 wholesaleRouter.get('/wholesale/:id', permissionGuard('wholesale_sales', 'canRead'), getSale);

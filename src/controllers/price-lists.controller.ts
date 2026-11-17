@@ -153,7 +153,8 @@ export async function updatePriceList(req: AuthRequest, res: Response) {
       where: { id: req.params.id },
       data: {
         name: name ?? undefined,
-        description: description ?? undefined,
+        // "" clears it (stored as null); undefined leaves it alone.
+        description: description === undefined ? undefined : String(description ?? "").trim() || null,
         isDefault: isDefault ?? undefined,
         rules: rules?.length ? {
           create: rules.map((r: any) => ({
