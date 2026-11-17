@@ -8,7 +8,7 @@ import { generateSystemId } from '../utils/generateSystemId.js';
 import { deleteStorageFiles } from '../lib/storage.js';
 import { getAvailableStock, isQuantityTracked, isService, quantityLots, resolveStockStatus, stockValueAtPrice, type StockLot } from '../lib/stock.js';
 import { stockApprovalRequired } from '../lib/tenantSettings.js';
-import { addQuantityStock } from '../services/quantityStockService.js';
+import { addQuantityStock, editQuantityOnHand, quantityEditStatus, QuantityEditError } from '../services/quantityStockService.js';
 import {
   resolveChannelFlags,
   channelsAreValid,
@@ -46,12 +46,13 @@ export function isUniqueViolationOn(error: unknown, column: string): boolean {
 }
 
 /**
- * A ProductItem carries exactly one of these, depending on its category type.
- * They overlap but are not identical: DEPLOYED is stock-only (also covers a
- * sold unit — there is no separate SOLD status), IN_USE is inventory-only.
+ * A ProductItem carries exactly one of these, depending on its category type:
+ * every value its enum declares, so the list can filter by any of them.
+ * DEPLOYED, IN_TRANSIT and SOLD are stock-only (SOLD on older sold units;
+ * sales now mark DEPLOYED), IN_USE is inventory-only.
  */
 const STOCK_ITEM_STATUSES = new Set([
-  'AVAILABLE', 'DEPLOYED', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD',
+  'AVAILABLE', 'DEPLOYED', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD', 'IN_TRANSIT', 'SOLD',
 ]);
 const INVENTORY_ITEM_STATUSES = new Set([
   'AVAILABLE', 'IN_USE', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD',
@@ -71,6 +72,7 @@ export const fetchCategoryById = (tenantId: string, id: string) =>
 
 const STATUS_AVAILABLE = 'AVAILABLE';
 
+// What a person may set by hand. IN_TRANSIT belongs to transfers and SOLD to sales.
 const STOCK_STATUSES = new Set(['AVAILABLE', 'DEPLOYED', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD']);
 const INVENTORY_STATUSES = new Set(['AVAILABLE', 'IN_USE', 'UNDER_MAINTENANCE', 'FAULTY', 'COMPLETELY_BAD']);
 
@@ -214,7 +216,7 @@ export const ProductItemCreateSchema = z.object({
   notes: z.string().optional(),
   /** Which option of the product this unit is. Absent = the product has no
    * variants, which is every product until one is created for it. */
-  variantId: z.string().optional(),
+  variantId: z.string().nullish(), // null = no variant (the offline queue sends null)
   // Accept any valid status string — validated at runtime against category type
   status: z.string().optional(),
 });
@@ -231,7 +233,7 @@ const ProductItemUpdateSchema = z.object({
    * authorised-quantity cap blocks deleting and re-adding them.
    * Empty string clears it back to un-attributed.
    */
-  variantId: z.string().optional(),
+  variantId: z.string().nullish(), // null = no variant (the offline queue sends null)
   // Accept any string — validated at runtime against category type
   status: z.string().optional(),
   imageUrl: z.string().url().optional().or(z.literal('')),
@@ -1044,7 +1046,23 @@ export const updateCategory = async (req: AuthRequest, res: Response) => {
       identifierLabel = resolveIdentifierLabel(resolvedType, data.identifierLabel);
     }
 
-    const updated = await (prisma as any).inventoryCategory.update({
+    // The quantity at hand is editable before the product's first sale only.
+    // Checked before anything is saved, so a refused quantity saves nothing.
+    const editQuantity =
+      data.quantityOnHand !== undefined && data.quantityOnHand !== (existing.quantityOnHand ?? 0);
+    if (editQuantity) {
+      const status = await quantityEditStatus(prisma, tenantId, existing.id);
+      if (status.block) {
+        return res.status(409).json({
+          success: false,
+          message: new QuantityEditError(status.block).message,
+          conflict: { type: 'QUANTITY_LOCKED', reason: status.block },
+        });
+      }
+    }
+
+    const updated = await prisma.$transaction(async (tx: any) => {
+     const saved = await tx.inventoryCategory.update({
       where: { id: req.params.id },
       data: {
         name: data.name ?? undefined,
@@ -1069,6 +1087,17 @@ export const updateCategory = async (req: AuthRequest, res: Response) => {
         images: data.images !== undefined ? data.images : undefined,
         notes: data.notes !== undefined ? data.notes : undefined,
       },
+     });
+     if (!editQuantity) return saved;
+     // After the field update, so a cost price changed in the same save prices the difference.
+     await editQuantityOnHand(tx, {
+       tenantId,
+       categoryId: existing.id,
+       quantity: data.quantityOnHand!,
+       isNewPurchase: data.isNewPurchase,
+       userId: req.user?.id,
+     });
+     return tx.inventoryCategory.findUnique({ where: { id: existing.id } });
     });
 
     // Delete removed images from storage (fire-and-forget)
@@ -1106,12 +1135,32 @@ export const updateCategory = async (req: AuthRequest, res: Response) => {
       data: formatCategory(updated, stats),
     });
   } catch (error) {
+    if (error instanceof QuantityEditError) {
+      return res.status(409).json({ success: false, message: error.message, conflict: { type: 'QUANTITY_LOCKED', reason: error.block } });
+    }
+    if (error instanceof Error && /stock changed while you were editing|whole number/.test(error.message)) {
+      return res.status(409).json({ success: false, message: error.message });
+    }
     console.error('Error updating inventory category:', error);
     return res.status(500).json({
       success: false,
       message: 'Failed to update category',
       error: error instanceof Error ? error.message : 'Unknown error',
     });
+  }
+};
+
+/** For Edit product: can the quantity at hand be typed in, and does an edit move money? */
+export const getQuantityEditStatus = async (req: AuthRequest, res: Response) => {
+  try {
+    const tenantId = req.tenantId!;
+    const existing = await fetchCategoryById(tenantId, String(req.params.id));
+    if (!existing) return res.status(404).json({ success: false, message: 'Product not found' });
+    const status = await quantityEditStatus(prisma, tenantId, existing.id);
+    return res.json({ success: true, data: { editable: !status.block, reason: status.block, mode: status.mode } });
+  } catch (error) {
+    console.error('Error reading quantity edit status:', error);
+    return res.status(500).json({ success: false, message: 'Failed to read the quantity edit status' });
   }
 };
 
@@ -1473,7 +1522,7 @@ const RestockRequestSchema = z.object({
   /** Device-generated id for a restock recorded offline; makes the retry safe. */
   offlineId: z.string().optional(),
   /** Which option the stock is for. Absent = the product has no variants. */
-  variantId: z.string().optional(),
+  variantId: z.string().nullish(), // null = no variant (the offline queue sends null)
   quantity: z.coerce.number().int().positive(),
   costPrice: z.coerce.number().nonnegative().optional(),
   plannedDate: z.string().optional(),
@@ -1845,9 +1894,10 @@ export const updateProductItem = async (req: AuthRequest, res: Response) => {
     const updated = await (prisma as any).productItem.update({
       where: { id: req.params.id },
       data: {
+        // "" clears a field (stored as null); undefined leaves it alone.
         ...(name !== undefined && { name: name.trim() || null }),
-        ...(userIdentifier !== undefined && { userIdentifier }),
-        ...(notes !== undefined && { notes }),
+        ...(userIdentifier !== undefined && { userIdentifier: userIdentifier.trim() || null }),
+        ...(notes !== undefined && { notes: notes.trim() || null }),
         ...(resolvedVariantId !== undefined && { variantId: resolvedVariantId }),
         ...statusUpdate,
         ...(imageUrl !== undefined && { imageUrl: imageUrl || null }),

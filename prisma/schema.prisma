@@ -1908,8 +1908,12 @@ model DeliveryNote {
   deliveredAt  DateTime? @map("delivered_at")
 
   driverName  String? @map("driver_name")
+  driverPhone String? @map("driver_phone")
   vehicleInfo String? @map("vehicle_info")
-  notes       String?
+  /// Where the goods go and when they are expected (also what a future storefront order will show).
+  deliveryAddress String?   @map("delivery_address")
+  deliveryDate    DateTime? @map("delivery_date")
+  notes           String?
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")

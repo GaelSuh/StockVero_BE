@@ -31,9 +31,13 @@ async function validateCustomerPhone(tenantId: string, phone?: string): Promise<
     : 'Enter a valid phone number.';
 }
 
+/** "" (or spaces) clears a text field: stored as null. undefined leaves it alone. */
+const blankToNull = (v?: string) => (v === undefined ? undefined : v.trim() || null);
+
 const CustomerSchema = z.object({
   name: z.string().min(1),
-  email: z.string().email().optional(),
+  // "" clears the email on edit; the format check applies only to a real address.
+  email: z.string().email().optional().or(z.literal('')),
   phone: z.string().optional(),
   location: z.string().optional(),
   address: z.string().optional(),
@@ -65,13 +69,13 @@ export const createCustomer = async (req: AuthRequest, res: Response) => {
         tenantId: req.tenantId!,
         branchId: activeBranchId(),
         name: data.name,
-        email: data.email,
-        phone: data.phone,
-        location: data.location,
-        address: data.address,
+        email: blankToNull(data.email),
+        phone: blankToNull(data.phone),
+        location: blankToNull(data.location),
+        address: blankToNull(data.address),
         initialRevenue: data.initialRevenue as any,
         status: (data.status as any) || 'ACTIVE',
-        notes: data.notes,
+        notes: blankToNull(data.notes),
         ...(data.createdAt ? { createdAt: new Date(data.createdAt) } : {}),
       },
     });
@@ -379,6 +383,12 @@ export const updateCustomer = async (req: AuthRequest, res: Response) => {
       });
     }
 
+    // The phone can be changed but not erased: it's how the till finds a
+    // returning customer (and the app requires it when creating one).
+    if (parsed.data.phone !== undefined && !parsed.data.phone.trim()) {
+      return res.status(400).json({ success: false, message: 'A phone number is required.' });
+    }
+
     const phoneError = await validateCustomerPhone(req.tenantId!, parsed.data.phone);
     if (phoneError) {
       return res.status(400).json({ success: false, message: phoneError });
@@ -388,6 +398,11 @@ export const updateCustomer = async (req: AuthRequest, res: Response) => {
       where: { id: req.params.id },
       data: {
         ...parsed.data,
+        email: blankToNull(parsed.data.email),
+        phone: parsed.data.phone?.trim(),
+        location: blankToNull(parsed.data.location),
+        address: blankToNull(parsed.data.address),
+        notes: blankToNull(parsed.data.notes),
         status: parsed.data.status ? (parsed.data.status as any) : undefined,
       },
     });

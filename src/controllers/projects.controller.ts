@@ -33,10 +33,11 @@ const ProjectSchema = z.object({
   description: z.string().optional(),
   status: z.enum(['PENDING', 'IN_PROGRESS', 'TESTING', 'COMPLETED', 'CANCELLED']).optional(),
   progress: z.number().int().min(0).max(100).optional(),
-  budget: z.number().nonnegative().optional(),
+  // null clears the budget or a date on edit; "" clears the text fields.
+  budget: z.number().nonnegative().nullable().optional(),
   technician: z.string().optional(),
-  startDate: z.string().datetime().optional(),
-  dueDate: z.string().datetime().optional(),
+  startDate: z.string().datetime().nullable().optional(),
+  dueDate: z.string().datetime().nullable().optional(),
 });
 
 /**
@@ -46,7 +47,7 @@ const ProjectSchema = z.object({
  * `ZodEffects` that neither method exists on. Called manually wherever a
  * start/due date pair is actually being set, on create and on update.
  */
-function validateProjectDates(startDate?: string, dueDate?: string): string | null {
+function validateProjectDates(startDate?: string | null, dueDate?: string | null): string | null {
   if (!startDate || !dueDate) return null;
   if (new Date(dueDate) < new Date(startDate)) {
     return 'Due date cannot be before the start date';
@@ -58,8 +59,9 @@ const MilestoneSchema = z.object({
   name: z.string().min(1),
   status: z.enum(['PENDING', 'ACTIVE', 'COMPLETED', 'SKIPPED']).optional(),
   progress: z.number().int().min(0).max(100).optional(),
-  startDate: z.string().date().optional(),
-  endDate: z.string().date().optional(),
+  // null clears a date on edit; "" clears the notes.
+  startDate: z.string().date().nullable().optional(),
+  endDate: z.string().date().nullable().optional(),
   notes: z.string().optional(),
   sortOrder: z.number().int().optional(),
 });
@@ -76,9 +78,13 @@ const MaterialSchema = z.object({
   includeCostInProject: z.boolean().optional(), // required when path is INVENTORY
 });
 
-function toDate(value?: string) {
+function toDate(value?: string | null) {
   return value ? new Date(value) : undefined;
 }
+
+/** An edit's value: undefined leaves the column alone, null or "" clears it. */
+const cleared = <T>(value: T | null | undefined, map: (v: T) => unknown = (v) => v) =>
+  value === undefined ? undefined : value === null || value === '' ? null : map(value);
 
 const getProjectBudgetLimit = (project: { availableBudget?: unknown; budget?: unknown }) => {
   const availableBudget = Number((project as any).availableBudget ?? 0);
@@ -100,8 +106,8 @@ const toDateOnly = (value?: Date | string | null) => {
 
 const validateMilestoneDates = (
   project: { startDate: Date | null; dueDate: Date | null },
-  startDate?: string,
-  endDate?: string,
+  startDate?: string | null,
+  endDate?: string | null,
 ) => {
   const projectStart = toDateOnly(project.startDate);
   const projectEnd = toDateOnly(project.dueDate);
@@ -417,6 +423,7 @@ export const createProject = async (req: AuthRequest, res: Response) => {
         progress: payload.progress || 0,
         budget: payload.budget as any,
         spent: totalSpent as any,
+        spentAmount: totalSpent as any, // both spend columns, so list and details agree
         technician: payload.technician,
         startDate: toDate(payload.startDate),
         dueDate: toDate(payload.dueDate),
@@ -715,8 +722,8 @@ export const updateProject = async (req: AuthRequest, res: Response) => {
     // the due date must still be compared against the start date already on
     // record, not silently skipped because this request didn't mention it.
     const dateError = validateProjectDates(
-      data.startDate ?? existing.startDate?.toISOString(),
-      data.dueDate ?? existing.dueDate?.toISOString(),
+      (data.startDate !== undefined ? data.startDate : existing.startDate?.toISOString()) ?? undefined,
+      (data.dueDate !== undefined ? data.dueDate : existing.dueDate?.toISOString()) ?? undefined,
     );
     if (dateError) {
       return res.status(400).json({ success: false, message: dateError });
@@ -759,13 +766,13 @@ export const updateProject = async (req: AuthRequest, res: Response) => {
       where: { id: req.params.id },
       data: {
         name: data.name,
-        description: data.description,
+        description: cleared(data.description?.trim()) as any,
         customerId: data.customerId !== undefined ? data.customerId : undefined,
         // progress is calculated automatically from phase completion — not user-editable
-        budget: data.budget as any,
-        technician: data.technician,
-        startDate: toDate(data.startDate),
-        dueDate: toDate(data.dueDate),
+        budget: cleared(data.budget) as any,
+        technician: cleared(data.technician?.trim()) as any,
+        startDate: cleared(data.startDate, (v) => new Date(v)) as any,
+        dueDate: cleared(data.dueDate, (v) => new Date(v)) as any,
         status: data.status ? (data.status as any) : undefined,
         isLocked: isLockedUpdate,
       },
@@ -1159,8 +1166,8 @@ export const updateMilestone = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const nextStartDate = parsed.data.startDate ?? (milestone.startDate ? milestone.startDate.toISOString().slice(0, 10) : undefined);
-    const nextEndDate = parsed.data.endDate ?? (milestone.endDate ? milestone.endDate.toISOString().slice(0, 10) : undefined);
+    const nextStartDate = parsed.data.startDate !== undefined ? parsed.data.startDate : (milestone.startDate ? milestone.startDate.toISOString().slice(0, 10) : undefined);
+    const nextEndDate = parsed.data.endDate !== undefined ? parsed.data.endDate : (milestone.endDate ? milestone.endDate.toISOString().slice(0, 10) : undefined);
     const message = validateMilestoneDates(
       { startDate: project.startDate ?? null, dueDate: project.dueDate ?? null },
       typeof nextStartDate === 'string' ? nextStartDate : undefined,
@@ -1177,9 +1184,9 @@ export const updateMilestone = async (req: AuthRequest, res: Response) => {
     if (parsed.data.name !== undefined) updateData.name = parsed.data.name;
     if (parsed.data.status !== undefined) updateData.status = parsed.data.status;
     if (parsed.data.progress !== undefined) updateData.progress = parsed.data.progress;
-    if (parsed.data.startDate !== undefined) updateData.startDate = toDate(parsed.data.startDate);
-    if (parsed.data.endDate !== undefined) updateData.endDate = toDate(parsed.data.endDate);
-    if (parsed.data.notes !== undefined) updateData.notes = parsed.data.notes;
+    if (parsed.data.startDate !== undefined) updateData.startDate = cleared(parsed.data.startDate, (v) => new Date(v));
+    if (parsed.data.endDate !== undefined) updateData.endDate = cleared(parsed.data.endDate, (v) => new Date(v));
+    if (parsed.data.notes !== undefined) updateData.notes = cleared(parsed.data.notes.trim());
     if (parsed.data.sortOrder !== undefined) updateData.sortOrder = parsed.data.sortOrder;
 
     const updated = await prisma.projectMilestone.update({
@@ -2074,7 +2081,11 @@ export const removeMaterialItem = async (req: AuthRequest, res: Response) => {
     const result = await prisma.$transaction(async (tx) => {
       const material = await tx.projectMaterial.findFirst({
         where: { id: materialId, projectId, tenantId: req.tenantId! },
-        include: { project: { select: { isLocked: true, name: true, spent: true } } },
+        include: {
+          project: {
+            select: { isLocked: true, name: true, spent: true, budget: true, availableBudget: true, spentAmount: true },
+          },
+        },
       }) as any;
       if (!material) throw new ApiError(404, 'Material not found');
       if (material.project.isLocked) throw new ApiError(403, 'This project is locked. No further changes can be made to phases or materials.');
@@ -2110,10 +2121,16 @@ export const removeMaterialItem = async (req: AuthRequest, res: Response) => {
         } as any,
       });
 
-      // Adjust project spent
+      // All three spend columns, as deleting a material does: the list reads
+      // spentAmount and the details page reads spent, so updating one split them.
+      const nextSpentAmount = Math.max(0, getProjectSpentAmount(material.project) - costDiff);
       await tx.project.update({
         where: { id: projectId },
-        data: { spent: (material.project.spent as any).sub ? material.project.spent.sub(costDiff) : (material.project.spent as any) - costDiff },
+        data: {
+          spent: (material.project.spent as any).sub ? material.project.spent.sub(costDiff) : (material.project.spent as any) - costDiff,
+          spentAmount: nextSpentAmount as any,
+          remainingBudget: Math.max(0, getProjectBudgetLimit(material.project) - nextSpentAmount) as any,
+        },
       });
 
       // Fetch remaining assigned items

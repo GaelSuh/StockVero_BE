@@ -49,6 +49,8 @@ export async function recordSaleTipAsIncome(
   sale: { id: string; saleNumber: string; soldByName: string },
   tipAmount: number,
   tenantId: string,
+  /** When the money was taken: the sale's own date for a sale synced from offline. */
+  at: Date = new Date(),
 ): Promise<void> {
   if (tipAmount <= 0) return;
 
@@ -64,7 +66,7 @@ export async function recordSaleTipAsIncome(
       moduleRef: 'retail_sales',
       entityId: sale.id,
       isAutomatic: true,
-      recordedAt: new Date(),
+      recordedAt: at,
     },
   });
 

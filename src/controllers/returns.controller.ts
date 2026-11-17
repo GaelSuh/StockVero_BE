@@ -93,6 +93,18 @@ export async function listReturns(req: AuthRequest, res: Response) {
 
     const where: any = { tenantId };
     if (req.query.saleId) where.saleId = req.query.saleId;
+    // Each Returns page shows its own mode's returns; search was sent and ignored.
+    const mode = String(req.query.mode ?? '').toUpperCase();
+    if (mode === 'RETAIL' || mode === 'WHOLESALE') where.sale = { mode };
+    const search = String(req.query.search ?? '').trim();
+    if (search) {
+      where.OR = [
+        { returnNumber: { contains: search, mode: 'insensitive' } },
+        { sale: { saleNumber: { contains: search, mode: 'insensitive' } } },
+        { sale: { customerName: { contains: search, mode: 'insensitive' } } },
+        { sale: { customer: { name: { contains: search, mode: 'insensitive' } } } },
+      ];
+    }
 
     const [returns, total] = await Promise.all([
       prisma.saleReturn.findMany({
