@@ -1685,6 +1685,22 @@ export const restockRequest = async (req: AuthRequest, res: Response) => {
       });
     }
 
+    // The stock history is the one place a restock shows up whether or not an
+    // invoice was raised; without approval the note had nowhere else to go.
+    // No unit exists yet, so the available count doesn't move (delta 0).
+    await recordStockEvent({
+      tenantId,
+      categoryId: category.id,
+      categoryType: category.type ?? 'STOCK',
+      eventType: 'RESTOCK_AUTHORISED',
+      delta: 0,
+      title: needsApproval
+        ? `Restock of ${quantity} unit(s) sent for approval`
+        : `Restock of ${quantity} unit(s) authorised`,
+      notes: notes?.trim() || null,
+      performedBy: submittedBy,
+    });
+
     void logAudit({
       tenantId,
       actorType: req.user?.accountType === 'employee' ? AuditActorType.EMPLOYEE : AuditActorType.OWNER,
@@ -1776,7 +1792,9 @@ export const listProductItems = async (req: AuthRequest, res: Response) => {
     const [items, total] = await Promise.all([
       (prisma as any).productItem.findMany({
         where,
-        orderBy: { createdAt: 'desc' },
+        // id breaks ties: bulk-added units share a timestamp, and without it
+        // consecutive pages could repeat some units and skip others.
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip,
         take: limit,
         // Every row can then say which option it is, rather than the units

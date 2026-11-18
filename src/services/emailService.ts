@@ -24,10 +24,13 @@ export async function sendEmail({
   to,
   subject,
   html,
+  replyTo,
 }: {
   to: string;
   subject: string;
   html: string;
+  /** Where a reply goes, when not to the sender (e.g. the visitor who wrote in). */
+  replyTo?: string;
 }): Promise<boolean> {
   let sent = false;
 
@@ -38,6 +41,7 @@ export async function sendEmail({
         to,
         subject,
         html,
+        replyTo,
       });
       if (error) {
         console.error(`[email] Resend rejected email to ${to} (${subject}):`, JSON.stringify(error));
@@ -57,6 +61,7 @@ export async function sendEmail({
         to,
         subject,
         html,
+        replyTo,
       });
       console.log(`[email] SMTP sent to ${to}: ${subject}`);
       sent = true;
