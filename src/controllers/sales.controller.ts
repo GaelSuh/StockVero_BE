@@ -44,6 +44,13 @@ const SALE_PAYMENT_METHODS = ['CASH', 'MTN_MOMO', 'ORANGE_MONEY', 'CARD', 'BANK_
 /** Not a payment: marks the unpaid remainder, never stored as a SalePayment row. */
 const CREDIT_MARKER = 'CREDIT';
 
+/** A % or fixed discount on `base`, kept between 0 and `base`. */
+function clampDiscount(type: unknown, value: unknown, base: number): number {
+  const v = Number(value) || 0;
+  const amount = type === 'PERCENTAGE' ? (base * v) / 100 : v;
+  return Math.min(Math.max(amount, 0), Math.max(base, 0));
+}
+
 export async function createSale(req: AuthRequest, res: Response) {
   try {
     const tenantId = req.tenantId!;
@@ -210,9 +217,9 @@ export async function createSale(req: AuthRequest, res: Response) {
           }
         }
 
-        const itemDiscount = item.discountType === 'PERCENTAGE'
-          ? (unitPrice * item.quantity * (item.discountValue || 0)) / 100
-          : (item.discountValue || 0);
+        // Kept between 0 and the line's own value: the till sends it, and an
+        // over-sized or negative discount must not make a line worth less than nothing.
+        const itemDiscount = clampDiscount(item.discountType, item.discountValue, unitPrice * item.quantity);
         const lineTotal = unitPrice * item.quantity - itemDiscount;
         subtotal += lineTotal;
         saleItems.push({
@@ -242,9 +249,7 @@ export async function createSale(req: AuthRequest, res: Response) {
       // claim succeeds, patched in once deductStockForSale returns).
       const requestedUnitIds: (string | null)[] = items.map((item: any) => item.unitId || null);
 
-      const saleDiscountAmount = discountType === 'PERCENTAGE'
-        ? (subtotal * (discountValue || 0)) / 100
-        : (discountValue || 0);
+      const saleDiscountAmount = clampDiscount(discountType, discountValue, subtotal);
       const totalAmount = subtotal - saleDiscountAmount;
 
       // CREDIT is not a way of paying, it is the absence of payment, and there is
