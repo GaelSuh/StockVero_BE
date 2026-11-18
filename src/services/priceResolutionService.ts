@@ -132,6 +132,9 @@ export async function resolvePricesForSale(
     customerId
       ? client.customerPriceList.findFirst({
           where: { customerId, priceList: { tenantId } },
+          // Newest list, the same one "Load price list" fills the cart from. Only
+          // customers assigned twice before one-list-per-customer can have two.
+          orderBy: { createdAt: 'desc' },
           include: {
             priceList: {
               include: {
