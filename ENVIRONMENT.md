@@ -71,6 +71,7 @@ The API needs one complete email provider. It tries Resend first, then SMTP.
 | `EMAIL_USER` | SMTP | SMTP account. | | Set |
 | `EMAIL_PASS` | SMTP | SMTP password (for Gmail, an app password). Secret. | | Set |
 | `EMAIL_FROM` | SMTP | Sender shown on emails sent through SMTP. | `StockVero <support@stockvero.com>` | **`SolarFlow Pro <ntiwa112@gmail.com>`**: emails from development go out under the old name and a personal address |
+| `SUPPORT_EMAIL` | No (default `tiwa.ndika@digisolgroup.net`) | Where the landing page's **Book appointment** requests are emailed (Reply answers the visitor). | `support@stockvero.com` | Not set |
 
 ---
 

@@ -9,6 +9,8 @@ import {
   deletePriceList,
   assignCustomerToPriceList,
   removeCustomerFromPriceList,
+  duplicatePriceList,
+  getCustomerPriceList,
 } from '../controllers/price-lists.controller.js';
 
 const router = Router();
@@ -17,7 +19,9 @@ router.use(tenantGuard, mustChangePasswordGuard, moduleGuard('wholesale_sales'))
 
 router.get('/', permissionGuard('wholesale_sales', 'canRead'), listPriceLists);
 router.post('/', permissionGuard('wholesale_sales', 'canCreate'), createPriceList);
+router.get('/for-customer/:customerId', permissionGuard('wholesale_sales', 'canRead'), getCustomerPriceList);
 router.get('/:id', permissionGuard('wholesale_sales', 'canRead'), getPriceList);
+router.post('/:id/duplicate', permissionGuard('wholesale_sales', 'canCreate'), duplicatePriceList);
 router.patch('/:id', permissionGuard('wholesale_sales', 'canUpdate'), updatePriceList);
 router.get('/:id/can-delete', permissionGuard('wholesale_sales', 'canDelete'), canDeletePriceList);
 router.delete('/:id', permissionGuard('wholesale_sales', 'canDelete'), deletePriceList);

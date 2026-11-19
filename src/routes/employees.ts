@@ -141,7 +141,7 @@ router.get('/:id', permissionGuard('administration', 'canRead'), getEmployee);
  *       200:
  *         description: Employee updated
  */
-router.patch('/:id', permissionGuard('administration', 'canCreate'), updateEmployee);
+router.patch('/:id', permissionGuard('administration', 'canUpdate'), updateEmployee);
 
 /**
  * @openapi
@@ -170,7 +170,7 @@ router.patch('/:id', permissionGuard('administration', 'canCreate'), updateEmplo
  *       200:
  *         description: Employee role updated
  */
-router.patch('/:id/role', permissionGuard('administration', 'canCreate'), updateEmployeeRole);
+router.patch('/:id/role', permissionGuard('administration', 'canUpdate'), updateEmployeeRole);
 
 /**
  * @openapi
@@ -198,7 +198,7 @@ router.patch('/:id/role', permissionGuard('administration', 'canCreate'), update
  *       200:
  *         description: Employee status updated
  */
-router.patch('/:id/status', permissionGuard('administration', 'canCreate'), updateEmployeeStatus);
+router.patch('/:id/status', permissionGuard('administration', 'canUpdate'), updateEmployeeStatus);
 
 /**
  * @openapi
@@ -216,7 +216,7 @@ router.patch('/:id/status', permissionGuard('administration', 'canCreate'), upda
  *       200:
  *         description: Password reset
  */
-router.patch('/:id/reset-password', permissionGuard('administration', 'canCreate'), resetEmployeePassword);
+router.patch('/:id/reset-password', permissionGuard('administration', 'canUpdate'), resetEmployeePassword);
 
 /**
  * @openapi
@@ -234,7 +234,7 @@ router.patch('/:id/reset-password', permissionGuard('administration', 'canCreate
  *       200:
  *         description: Employee deactivated
  */
-router.get('/:id/can-delete', permissionGuard('administration', 'canCreate'), async (req: AuthRequest, res: Response) => {
+router.get('/:id/can-delete', permissionGuard('administration', 'canDelete'), async (req: AuthRequest, res: Response) => {
   try {
     const report = await checkEmployeeDependencies(req.params.id, req.tenantId!);
     return res.json({ success: true, data: report });
@@ -243,7 +243,7 @@ router.get('/:id/can-delete', permissionGuard('administration', 'canCreate'), as
   }
 });
 
-router.delete('/:id', permissionGuard('administration', 'canCreate'), async (req: AuthRequest, res: Response) => {
+router.delete('/:id', permissionGuard('administration', 'canDelete'), async (req: AuthRequest, res: Response) => {
   const report = await checkEmployeeDependencies(req.params.id, req.tenantId!);
   if (!report.canDelete) {
     return res.status(409).json({ success: false, message: 'Cannot delete: unresolved dependencies', data: report });

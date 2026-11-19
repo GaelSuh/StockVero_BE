@@ -148,6 +148,8 @@ const deriveStatusFromMilestones = (currentStatus: string, milestones: Array<{ s
   return currentStatus === 'COMPLETED' ? 'IN_PROGRESS' : currentStatus;
 };
 
+const PROJECT_STATUSES = ['PENDING', 'IN_PROGRESS', 'TESTING', 'COMPLETED', 'CANCELLED'] as const;
+
 const applyOverdueStatus = (status: string, dueDate?: Date | null) => {
   if (status === 'COMPLETED' || status === 'CANCELLED') return status;
   // Compared by calendar date, not exact timestamp. A due date sent as a bare
@@ -571,15 +573,30 @@ export const listProjects = async (req: AuthRequest, res: Response) => {
   try {
     const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 20;
-    const status = req.query.status ? String(req.query.status) : undefined;
+    const status = req.query.status ? String(req.query.status).toUpperCase() : undefined;
+    const customerId = typeof req.query.customerId === 'string' && req.query.customerId ? req.query.customerId : undefined;
+    const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
     const skip = (page - 1) * limit;
 
     const where: any = { tenantId: req.tenantId! };
-    if (status && status.toUpperCase() === 'OVERDUE') {
-      where.dueDate = { lt: new Date() };
+    if (status === 'OVERDUE') {
+      // Same rule as applyOverdueStatus: overdue once the due day has ended (UTC).
+      const now = new Date();
+      where.dueDate = { lt: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())) };
       where.status = { notIn: ['COMPLETED', 'CANCELLED'] };
     } else if (status) {
-      where.status = status as any;
+      if (!PROJECT_STATUSES.includes(status as (typeof PROJECT_STATUSES)[number])) {
+        return res.status(400).json({ success: false, message: `Unknown status "${status}".` });
+      }
+      where.status = status;
+    }
+    if (customerId) where.customerId = customerId;
+    if (search) {
+      where.OR = [
+        { name: { contains: search, mode: 'insensitive' } },
+        { description: { contains: search, mode: 'insensitive' } },
+        { customer: { name: { contains: search, mode: 'insensitive' } } },
+      ];
     }
 
     const [projects, total] = await Promise.all([

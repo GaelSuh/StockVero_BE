@@ -93,7 +93,9 @@ export async function processReturn(
         const key = lineKey(line.categoryId, (line as any).variantId);
         soldByCategory.set(key, (soldByCategory.get(key) ?? 0) + line.quantity);
         if (!soldUnitPriceByCategory.has(key)) {
-          soldUnitPriceByCategory.set(key, Number(line.unitPrice));
+          // What one unit was actually paid: after the line's own discount.
+          const paid = line.quantity > 0 ? Number(line.lineTotal) / line.quantity : Number(line.unitPrice);
+          soldUnitPriceByCategory.set(key, Math.round(paid * 100) / 100);
         }
       }
 
