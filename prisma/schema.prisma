@@ -1850,17 +1850,21 @@ model PriceList {
 }
 
 model PriceRule {
-  id          String  @id @default(uuid())
-  priceListId String  @map("price_list_id")
-  categoryId  String  @map("category_id")
+  id              String   @id @default(uuid())
+  priceListId     String   @map("price_list_id")
+  categoryId      String   @map("category_id")
   /// Null = applies to every variant of the product (and to products with no
   /// variants at all) — this is what every pre-phase-1 rule has and keeps.
   /// Set = applies only to this one variant, and outranks a null-variant
   /// rule at the same minQuantity tier. See the 6-tier cascade in
   /// priceResolutionService.ts.
-  variantId   String? @map("variant_id")
-  minQuantity Int     @default(1) @map("min_quantity")
-  unitPrice   Decimal @map("unit_price") @db.Decimal(15, 2)
+  variantId       String?  @map("variant_id")
+  minQuantity     Int      @default(1) @map("min_quantity")
+  /// Exactly one of unitPrice / discountPercent is set (CHECK
+  /// price_rules_price_or_discount). discountPercent is taken off the
+  /// variant's own price, else the product's selling price, at sale time.
+  unitPrice       Decimal? @map("unit_price") @db.Decimal(15, 2)
+  discountPercent Decimal? @map("discount_percent") @db.Decimal(5, 2)
 
   priceList PriceList         @relation(fields: [priceListId], references: [id], onDelete: Cascade)
   category  InventoryCategory @relation(fields: [categoryId], references: [id])
@@ -1910,9 +1914,9 @@ model DeliveryNote {
   dispatchedAt DateTime? @map("dispatched_at")
   deliveredAt  DateTime? @map("delivered_at")
 
-  driverName  String? @map("driver_name")
-  driverPhone String? @map("driver_phone")
-  vehicleInfo String? @map("vehicle_info")
+  driverName      String?   @map("driver_name")
+  driverPhone     String?   @map("driver_phone")
+  vehicleInfo     String?   @map("vehicle_info")
   /// Where the goods go and when they are expected (also what a future storefront order will show).
   deliveryAddress String?   @map("delivery_address")
   deliveryDate    DateTime? @map("delivery_date")

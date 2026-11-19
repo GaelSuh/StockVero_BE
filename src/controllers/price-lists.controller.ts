@@ -26,9 +26,65 @@ function summariseRules(rules: any[]): Record<string, any> {
       categoryId: r.categoryId,
       variantId: r.variantId ?? null,
       minQuantity: r.minQuantity,
-      unitPrice: String(r.unitPrice),
+      unitPrice: r.unitPrice == null ? null : String(r.unitPrice),
+      discountPercent: r.discountPercent == null ? null : String(r.discountPercent),
     })),
   };
+}
+
+type RuleRow = {
+  categoryId: string;
+  variantId: string | null;
+  minQuantity: number;
+  unitPrice: number | null;
+  discountPercent: number | null;
+};
+
+/**
+ * Checks the rules a client sent and returns the rows to write, or an error
+ * message. Each rule is a fixed price or a percentage off, never both; every
+ * product and variant must belong to this business.
+ */
+async function parseRules(tenantId: string, input: unknown): Promise<RuleRow[] | string> {
+  if (!Array.isArray(input)) return 'rules must be a list';
+  const rows: RuleRow[] = [];
+  for (const r of input as any[]) {
+    const price = r?.unitPrice == null || r.unitPrice === '' ? null : Number(r.unitPrice);
+    const pct = r?.discountPercent == null || r.discountPercent === '' ? null : Number(r.discountPercent);
+    const minQuantity = r?.minQuantity == null ? 1 : Number(r.minQuantity);
+    if (!r?.categoryId || typeof r.categoryId !== 'string') return 'Each rule needs a product';
+    if (!Number.isInteger(minQuantity) || minQuantity < 1) return 'Minimum quantity must be a whole number of at least 1';
+    if ((price == null) === (pct == null)) return 'Each rule needs either a price or a discount, not both';
+    if (price != null && !(Number.isFinite(price) && price > 0)) return 'Price must be greater than 0';
+    if (pct != null && !(Number.isFinite(pct) && pct > 0 && pct < 100)) return 'Discount must be between 0 and 100%';
+    rows.push({
+      categoryId: r.categoryId,
+      variantId: r.variantId || null,
+      minQuantity,
+      unitPrice: price,
+      discountPercent: pct == null ? null : Math.round(pct * 100) / 100,
+    });
+  }
+  const categoryIds = [...new Set(rows.map((r) => r.categoryId))];
+  const variantIds = [...new Set(rows.map((r) => r.variantId).filter(Boolean))] as string[];
+  const [cats, vars] = await Promise.all([
+    prisma.inventoryCategory.count({ where: { tenantId, id: { in: categoryIds } } }),
+    variantIds.length
+      ? prisma.productVariant.findMany({ where: { id: { in: variantIds }, category: { tenantId } }, select: { id: true, categoryId: true } })
+      : Promise.resolve([] as { id: string; categoryId: string }[]),
+  ]);
+  if (cats !== categoryIds.length) return 'A product in this list was not found';
+  const variantProduct = new Map(vars.map((v) => [v.id, v.categoryId]));
+  if (rows.some((r) => r.variantId && variantProduct.get(r.variantId) !== r.categoryId)) {
+    return 'A variant in this list was not found';
+  }
+  const seen = new Set<string>();
+  for (const r of rows) {
+    const key = `${r.categoryId}|${r.variantId ?? ''}|${r.minQuantity}`;
+    if (seen.has(key)) return 'The same product appears twice at the same quantity';
+    seen.add(key);
+  }
+  return rows;
 }
 
 export async function createPriceList(req: AuthRequest, res: Response) {
@@ -37,34 +93,25 @@ export async function createPriceList(req: AuthRequest, res: Response) {
     const { name, description, isDefault, rules } = req.body;
 
     if (!name) return res.status(400).json({ success: false, message: 'Name is required' });
+    const rows = await parseRules(tenantId, rules ?? []);
+    if (typeof rows === 'string') return res.status(400).json({ success: false, message: rows });
 
-    if (isDefault) {
-      await prisma.priceList.updateMany({
-        where: { tenantId, isDefault: true },
-        data: { isDefault: false },
+    const priceList = await prisma.$transaction(async (tx) => {
+      if (isDefault) {
+        await tx.priceList.updateMany({ where: { tenantId, isDefault: true }, data: { isDefault: false } });
+      }
+      const list = await tx.priceList.create({
+        data: {
+          tenantId,
+          branchId: activeBranchId(),
+          name,
+          description: description || null,
+          isDefault: isDefault || false,
+        },
       });
-    }
-
-    const priceList = await prisma.priceList.create({
-      data: {
-        tenantId,
-        branchId: activeBranchId(),
-        name,
-        description: description || null,
-        isDefault: isDefault || false,
-        rules: rules?.length ? {
-          create: rules.map((r: any) => ({
-            categoryId: r.categoryId,
-            // Without this the variant tiers of the 6-tier cascade in
-            // priceResolutionService could never be reached — the column
-            // would exist but nothing could ever set it.
-            variantId: r.variantId ?? null,
-            minQuantity: r.minQuantity || 1,
-            unitPrice: r.unitPrice,
-          })),
-        } : undefined,
-      },
-      include: { rules: true },
+      // createMany: a list can hold hundreds of products.
+      if (rows.length) await tx.priceRule.createMany({ data: rows.map((r) => ({ ...r, priceListId: list.id })) });
+      return tx.priceList.findUniqueOrThrow({ where: { id: list.id }, include: { rules: true } });
     });
 
     // After the write, never inside it: logAudit and broadcastToModule use the
@@ -137,35 +184,32 @@ export async function updatePriceList(req: AuthRequest, res: Response) {
 
     const existing = await prisma.priceList.findFirst({ where: { id: req.params.id, tenantId } });
     if (!existing) return res.status(404).json({ success: false, message: 'Price list not found' });
+    const rows = rules === undefined ? undefined : await parseRules(tenantId, rules);
+    if (typeof rows === 'string') return res.status(400).json({ success: false, message: rows });
 
-    if (isDefault) {
-      await prisma.priceList.updateMany({
-        where: { tenantId, isDefault: true, id: { not: req.params.id } },
-        data: { isDefault: false },
+    // One transaction: the old rules go and the new ones arrive together, so a
+    // failed write never leaves the customer with an empty list.
+    const updated = await prisma.$transaction(async (tx) => {
+      if (isDefault) {
+        await tx.priceList.updateMany({
+          where: { tenantId, isDefault: true, id: { not: req.params.id } },
+          data: { isDefault: false },
+        });
+      }
+      if (rows) {
+        await tx.priceRule.deleteMany({ where: { priceListId: req.params.id } });
+        if (rows.length) await tx.priceRule.createMany({ data: rows.map((r) => ({ ...r, priceListId: req.params.id })) });
+      }
+      return tx.priceList.update({
+        where: { id: req.params.id },
+        data: {
+          name: name ?? undefined,
+          // "" clears it (stored as null); undefined leaves it alone.
+          description: description === undefined ? undefined : String(description ?? "").trim() || null,
+          isDefault: isDefault ?? undefined,
+        },
+        include: { rules: true },
       });
-    }
-
-    if (rules) {
-      await prisma.priceRule.deleteMany({ where: { priceListId: req.params.id } });
-    }
-
-    const updated = await prisma.priceList.update({
-      where: { id: req.params.id },
-      data: {
-        name: name ?? undefined,
-        // "" clears it (stored as null); undefined leaves it alone.
-        description: description === undefined ? undefined : String(description ?? "").trim() || null,
-        isDefault: isDefault ?? undefined,
-        rules: rules?.length ? {
-          create: rules.map((r: any) => ({
-            categoryId: r.categoryId,
-            variantId: r.variantId ?? null,
-            minQuantity: r.minQuantity || 1,
-            unitPrice: r.unitPrice,
-          })),
-        } : undefined,
-      },
-      include: { rules: true },
     });
 
     await logAudit({
@@ -181,7 +225,7 @@ export async function updatePriceList(req: AuthRequest, res: Response) {
       // so a field-level diff would be noise — the resulting tiers are the
       // meaningful record.
       details: {
-        rulesReplaced: Boolean(rules),
+        rulesReplaced: Boolean(rows),
         isDefault: updated.isDefault,
         ...summariseRules(updated.rules),
       },
@@ -257,25 +301,109 @@ export async function assignCustomerToPriceList(req: AuthRequest, res: Response)
     const existing = await prisma.priceList.findFirst({ where: { id: req.params.id, tenantId: req.tenantId! } });
     if (!existing) return res.status(404).json({ success: false, message: 'Price list not found' });
 
-    const assignment = await prisma.customerPriceList.upsert({
-      where: { customerId_priceListId: { customerId, priceListId: req.params.id } },
-      update: {},
-      create: { customerId, priceListId: req.params.id },
+    const customer = await prisma.customer.findFirst({ where: { id: customerId, tenantId: req.tenantId! }, select: { name: true } });
+    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
+
+    // One list per customer: the till prices from a single list, and with two
+    // it picked one at random. Assigning a new list takes the customer off the old one.
+    const assignment = await prisma.$transaction(async (tx) => {
+      await tx.customerPriceList.deleteMany({ where: { customerId, priceListId: { not: req.params.id } } });
+      return tx.customerPriceList.upsert({
+        where: { customerId_priceListId: { customerId, priceListId: req.params.id } },
+        update: {},
+        create: { customerId, priceListId: req.params.id },
+      });
     });
 
-    const customer = await prisma.customer.findFirst({ where: { id: customerId, tenantId: req.tenantId! }, select: { name: true } });
     auditRequest(req, {
       action: 'PRICE_LIST_CUSTOMER_ASSIGNED',
       module: 'wholesale_sales',
       entityType: 'PriceList',
       entityId: existing.id,
       entityLabel: existing.name,
-      details: { customerId, customer: customer?.name ?? null },
+      details: { customerId, customer: customer.name },
     });
 
     return res.status(201).json({ success: true, message: 'Customer assigned', data: assignment });
   } catch (error) {
     return res.status(500).json({ success: false, message: 'Failed to assign customer' });
+  }
+}
+
+/**
+ * POST /:id/duplicate — a copy of the list and all its prices under a new
+ * name, with no customers. For setting up a similar customer.
+ */
+export async function duplicatePriceList(req: AuthRequest, res: Response) {
+  try {
+    const tenantId = req.tenantId!;
+    const source = await prisma.priceList.findFirst({ where: { id: req.params.id, tenantId }, include: { rules: true } });
+    if (!source) return res.status(404).json({ success: false, message: 'Price list not found' });
+    const name = String(req.body?.name ?? '').trim() || `${source.name} (copy)`;
+
+    const copy = await prisma.$transaction(async (tx) => {
+      const list = await tx.priceList.create({
+        data: { tenantId, branchId: activeBranchId(), name, description: source.description, isDefault: false },
+      });
+      if (source.rules.length) {
+        await tx.priceRule.createMany({
+          data: source.rules.map((r) => ({
+            priceListId: list.id,
+            categoryId: r.categoryId,
+            variantId: r.variantId,
+            minQuantity: r.minQuantity,
+            unitPrice: r.unitPrice,
+            discountPercent: r.discountPercent,
+          })),
+        });
+      }
+      return list;
+    });
+
+    auditRequest(req, {
+      action: 'PRICE_LIST_CREATED',
+      module: PRICING_MODULE,
+      entityType: 'PriceList',
+      entityId: copy.id,
+      entityLabel: copy.name,
+      details: { duplicatedFrom: source.id, count: source.rules.length },
+    });
+    return res.status(201).json({ success: true, message: 'Price list duplicated', data: copy });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to duplicate price list' });
+  }
+}
+
+/**
+ * GET /for-customer/:customerId — the customer's own list with its products,
+ * for loading it into a wholesale cart. data is null when they have none.
+ */
+export async function getCustomerPriceList(req: AuthRequest, res: Response) {
+  try {
+    const assignment = await prisma.customerPriceList.findFirst({
+      where: {
+        customerId: req.params.customerId,
+        customer: { tenantId: req.tenantId! },
+        priceList: { tenantId: req.tenantId! },
+      },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        priceList: {
+          include: {
+            rules: {
+              orderBy: { minQuantity: 'asc' },
+              include: {
+                category: { select: { id: true, name: true, sku: true } },
+                variant: { select: { id: true, label: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+    return res.json({ success: true, data: assignment?.priceList ?? null });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to load the customer price list' });
   }
 }
 

@@ -1,6 +1,5 @@
 import { Router, Response } from 'express';
 import { tenantGuard, moduleGuard, mustChangePasswordGuard, permissionGuard } from '../middleware/auth.js';
-import { prisma } from '../db.js';
 import { AuthRequest } from '../types/index.js';
 import { checkProjectDependencies } from '../services/dependencyCheckService.js';
 import {
@@ -46,66 +45,16 @@ router.use(tenantGuard, mustChangePasswordGuard, moduleGuard('projects'));
  *         name: status
  *         schema:
  *           type: string
+ *         description: PENDING, IN_PROGRESS, TESTING, COMPLETED, CANCELLED or OVERDUE
+ *       - in: query
+ *         name: search
+ *         schema:
+ *           type: string
  *     responses:
  *       200:
  *         description: Paginated project list
  */
-router.get('/', permissionGuard('projects', 'canRead'), async (req, res) => {
-  const hasCustomerFilter = typeof req.query.customerId === 'string' && req.query.customerId.length > 0;
-  const hasSearch = typeof req.query.search === 'string' && req.query.search.length > 0;
-
-  if (!hasCustomerFilter && !hasSearch) {
-    return listProjectsController(req, res);
-  }
-
-  try {
-    const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
-    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 20;
-    const status = req.query.status ? String(req.query.status) : undefined;
-    const customerId = hasCustomerFilter ? String(req.query.customerId) : undefined;
-    const search = hasSearch ? String(req.query.search) : undefined;
-    const skip = (page - 1) * limit;
-
-    const where: any = { tenantId: (req as any).tenantId! };
-    if (status) where.status = status as any;
-    if (customerId) where.customerId = customerId;
-    if (search) {
-      where.OR = [
-        { name: { contains: search, mode: 'insensitive' } },
-        { description: { contains: search, mode: 'insensitive' } },
-        { customer: { name: { contains: search, mode: 'insensitive' } } },
-      ];
-    }
-
-    const [projects, total] = await Promise.all([
-      prisma.project.findMany({
-        where,
-        include: {
-          customer: { select: { id: true, name: true } },
-          milestones: true,
-        },
-        orderBy: { createdAt: 'desc' },
-        skip,
-        take: limit,
-      }),
-      prisma.project.count({ where }),
-    ]);
-
-    return res.json({
-      success: true,
-      message: 'Projects retrieved successfully',
-      data: projects,
-      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
-    });
-  } catch (error) {
-    console.error('Error listing projects:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to retrieve projects',
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
-  }
-});
+router.get('/', permissionGuard('projects', 'canRead'), listProjectsController);
 
 /**
  * @openapi

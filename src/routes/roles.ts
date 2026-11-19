@@ -141,7 +141,7 @@ router.get('/:id', permissionGuard('administration', 'canRead'), getRole);
  *       200:
  *         description: Role updated
  */
-router.patch('/:id', permissionGuard('administration', 'canCreate'), updateRole);
+router.patch('/:id', permissionGuard('administration', 'canUpdate'), updateRole);
 
 /**
  * @openapi
@@ -159,7 +159,7 @@ router.patch('/:id', permissionGuard('administration', 'canCreate'), updateRole)
  *       200:
  *         description: Role deleted
  */
-router.get('/:id/can-delete', permissionGuard('administration', 'canCreate'), async (req: AuthRequest, res: Response) => {
+router.get('/:id/can-delete', permissionGuard('administration', 'canDelete'), async (req: AuthRequest, res: Response) => {
   try {
     const report = await checkRoleDependencies(req.params.id, req.tenantId!);
     return res.json({ success: true, data: report });
@@ -168,7 +168,7 @@ router.get('/:id/can-delete', permissionGuard('administration', 'canCreate'), as
   }
 });
 
-router.delete('/:id', permissionGuard('administration', 'canCreate'), async (req: AuthRequest, res: Response) => {
+router.delete('/:id', permissionGuard('administration', 'canDelete'), async (req: AuthRequest, res: Response) => {
   const report = await checkRoleDependencies(req.params.id, req.tenantId!);
   if (!report.canDelete) {
     return res.status(409).json({ success: false, message: 'Cannot delete: unresolved dependencies', data: report });

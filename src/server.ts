@@ -33,6 +33,7 @@ import salesRoutes from './routes/sales.js';
 import returnsRoutes from './routes/returns.js';
 import priceListsRoutes from './routes/price-lists.js';
 import deliveryRoutes from './routes/delivery.js';
+import appointmentsRoutes from './routes/appointments.js';
 import { startCronJobs } from './services/scheduler.js';
 import { syncModules } from './services/moduleSync.js';
 
@@ -93,6 +94,7 @@ app.use('/api/v1/sales', apiLimiter, salesRoutes);
 app.use('/api/v1/returns', apiLimiter, returnsRoutes);
 app.use('/api/v1/price-lists', apiLimiter, priceListsRoutes);
 app.use('/api/v1/delivery-notes', apiLimiter, deliveryRoutes);
+app.use('/api/v1/appointments', appointmentsRoutes); // public, own stricter limiter
 app.use('/api/admin/v1', apiLimiter, adminRoutes);
 
 if (process.env.NODE_ENV !== 'production') {

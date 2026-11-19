@@ -30,8 +30,22 @@ type PrismaLike = typeof prisma;
  * minQuantity descending, so the first rule the order reaches is the
  * highest tier it qualifies for.
  */
-function applicableRule(rules: { minQuantity: number; unitPrice: any }[], quantity: number) {
+function applicableRule<T extends { minQuantity: number }>(rules: T[], quantity: number) {
   return rules.find((rule) => quantity >= rule.minQuantity);
+}
+
+/**
+ * The price a rule sets: its fixed unit price, or its percentage off `base`.
+ * Null when it is a percentage and there is nothing to take it off, so the
+ * cascade moves on rather than selling at 0.
+ */
+export function rulePrice(
+  rule: { unitPrice: unknown; discountPercent?: unknown },
+  base: number | null,
+): number | null {
+  if (rule.unitPrice != null) return Number(rule.unitPrice);
+  if (rule.discountPercent == null || base == null) return null;
+  return Math.round(base * (100 - Number(rule.discountPercent))) / 100;
 }
 
 /** Splits a category's rules into the ones scoped to this specific variant and the product-level ones. */
@@ -48,28 +62,10 @@ function productTier(sellingPrice: unknown, variantLabel?: string): ResolvedPric
     : { unitPrice: 0, source: 'PRODUCT', variantLabel, missingPrice: true };
 }
 
-async function productPrice(client: PrismaLike, categoryId: string, variantLabel?: string) {
-  const category = await client.inventoryCategory.findUnique({
-    where: { id: categoryId },
-    select: { sellingPrice: true },
-  });
-  return productTier(category?.sellingPrice, variantLabel);
-}
-
-async function loadVariant(client: PrismaLike, variantId: string) {
-  return client.productVariant.findUnique({
-    where: { id: variantId },
-    select: { label: true, priceOverride: true },
-  });
-}
-
 /**
  * Works out what one unit of a product (optionally, one specific variant of
- * it) costs this customer at this quantity. Six tiers, most specific first —
- * see priceResolutionService's earlier revisions for the full cascade
- * rationale; unchanged here except for accepting a caller-supplied client so
- * this can run inside a `prisma.$transaction` instead of always hitting the
- * pool directly.
+ * it) costs this customer at this quantity. A one-line call to
+ * resolvePricesForSale, so the cascade lives in one place.
  */
 export async function resolvePriceDetailed(
   tenantId: string,
@@ -79,61 +75,8 @@ export async function resolvePriceDetailed(
   variantId: string | null = null,
   client: PrismaLike = prisma,
 ): Promise<ResolvedPrice> {
-  const variant = variantId ? await loadVariant(client, variantId) : null;
-  const variantLabel = variant?.label;
-
-  async function fallbackPrice(): Promise<ResolvedPrice> {
-    if (variant?.priceOverride != null) {
-      return { unitPrice: Number(variant.priceOverride), source: 'VARIANT', variantLabel };
-    }
-    return productPrice(client, categoryId, variantLabel);
-  }
-
-  if (!customerId) return fallbackPrice();
-
-  const customerPriceList = await client.customerPriceList.findFirst({
-    where: { customerId, priceList: { tenantId } },
-    include: {
-      priceList: {
-        include: { rules: { where: { categoryId }, orderBy: { minQuantity: 'desc' } } },
-      },
-    },
-  });
-
-  if (customerPriceList?.priceList) {
-    const { variantRules, productRules } = splitRules(customerPriceList.priceList.rules, variantId);
-    const rule = applicableRule(variantRules, quantity) ?? applicableRule(productRules, quantity);
-    if (rule) {
-      return {
-        unitPrice: Number(rule.unitPrice),
-        source: 'CUSTOMER_LIST',
-        priceListId: customerPriceList.priceList.id,
-        priceListName: customerPriceList.priceList.name,
-        variantLabel,
-      };
-    }
-  }
-
-  const defaultList = await client.priceList.findFirst({
-    where: { tenantId, isDefault: true },
-    include: { rules: { where: { categoryId }, orderBy: { minQuantity: 'desc' } } },
-  });
-
-  if (defaultList) {
-    const { variantRules, productRules } = splitRules(defaultList.rules, variantId);
-    const rule = applicableRule(variantRules, quantity) ?? applicableRule(productRules, quantity);
-    if (rule) {
-      return {
-        unitPrice: Number(rule.unitPrice),
-        source: 'DEFAULT_LIST',
-        priceListId: defaultList.id,
-        priceListName: defaultList.name,
-        variantLabel,
-      };
-    }
-  }
-
-  return fallbackPrice();
+  const [resolved] = await resolvePricesForSale(tenantId, customerId, [{ categoryId, quantity, variantId }], client);
+  return resolved;
 }
 
 /** Price only, for callers that do not care where it came from. */
@@ -189,6 +132,9 @@ export async function resolvePricesForSale(
     customerId
       ? client.customerPriceList.findFirst({
           where: { customerId, priceList: { tenantId } },
+          // Newest list, the same one "Load price list" fills the cart from. Only
+          // customers assigned twice before one-list-per-customer can have two.
+          orderBy: { createdAt: 'desc' },
           include: {
             priceList: {
               include: {
@@ -231,6 +177,12 @@ export async function resolvePricesForSale(
     const variantLabel = variant?.label;
     const category = categoryById.get(line.categoryId);
 
+    /** What a percentage rule is taken off: the variant's own price, else the product's. */
+    function basePrice(): number | null {
+      const p = variant?.priceOverride ?? category?.sellingPrice;
+      return p == null ? null : Number(p);
+    }
+
     function fallback(): ResolvedPrice {
       if (variant?.priceOverride != null) {
         return { unitPrice: Number(variant.priceOverride), source: 'VARIANT', variantLabel };
@@ -246,9 +198,10 @@ export async function resolvePricesForSale(
       );
       const { variantRules, productRules } = splitRules(rulesForCategory, line.variantId ?? null);
       const rule = applicableRule(variantRules, line.quantity) ?? applicableRule(productRules, line.quantity);
-      if (rule) {
+      const price = rule && rulePrice(rule, basePrice());
+      if (price != null) {
         return {
-          unitPrice: Number(rule.unitPrice),
+          unitPrice: price,
           source: 'CUSTOMER_LIST',
           priceListId: customerPriceList.priceList.id,
           priceListName: customerPriceList.priceList.name,
@@ -261,9 +214,10 @@ export async function resolvePricesForSale(
       const rulesForCategory = defaultList.rules.filter((r: any) => r.categoryId === line.categoryId);
       const { variantRules, productRules } = splitRules(rulesForCategory, line.variantId ?? null);
       const rule = applicableRule(variantRules, line.quantity) ?? applicableRule(productRules, line.quantity);
-      if (rule) {
+      const price = rule && rulePrice(rule, basePrice());
+      if (price != null) {
         return {
-          unitPrice: Number(rule.unitPrice),
+          unitPrice: price,
           source: 'DEFAULT_LIST',
           priceListId: defaultList.id,
           priceListName: defaultList.name,
