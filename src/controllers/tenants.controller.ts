@@ -52,6 +52,25 @@ const UpdateTenantMeSchema = z.object({
   logoUrl: z.string().nullable().optional(),
   /** Owner-controlled: put stock purchases in front of finance before units land. */
   stockApprovalRequired: z.boolean().optional(),
+  /**
+   * Document format: template and letterhead. Replaces the stored one as a
+   * whole. Colours come from the company's theme, so none is stored here; keys
+   * an older app still sends (headerColor, font, fontSize, dividers) are dropped.
+   */
+  documents: z
+    .object({
+      template: z.enum(['modern', 'classic', 'compact']).optional(),
+      letterheadUrl: z.string().max(2000).nullable().optional(),
+      address: z.string().trim().max(200).optional(),
+      phone: z.string().trim().max(40).optional(),
+      email: z.string().trim().email('Enter a valid email').max(120).optional(),
+      website: z.string().trim().max(120).optional(),
+      taxId: z.string().trim().max(40).optional(),
+      registrationNumber: z.string().trim().max(60).optional(),
+      footerText: z.string().trim().max(300).optional(),
+      firstPageOnly: z.boolean().optional(),
+    })
+    .optional(),
 });
 
 export const updateMyTenant = async (req: AuthRequest, res: Response) => {
@@ -64,19 +83,26 @@ export const updateMyTenant = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const { name, industry, organizationType, website, logoUrl, stockApprovalRequired } = parsed.data;
+    const { name, industry, organizationType, website, logoUrl, stockApprovalRequired, documents } = parsed.data;
     const updates: Record<string, any> = {};
 
-    // Merged rather than replaced — settingsConfig is a shared bag and other
-    // keys will land in it later.
-    if (stockApprovalRequired !== undefined) {
+    // Merged rather than replaced — settingsConfig is a shared bag: changing one
+    // setting must not wipe the others.
+    if (stockApprovalRequired !== undefined || documents !== undefined) {
       const current = await prisma.tenant.findUnique({
         where: { id: req.tenantId! },
         select: { settingsConfig: true },
       });
+      const settings = readTenantSettings(current);
+      // A letterhead image replaced or removed is deleted from storage.
+      const oldLetterhead = settings.documents?.letterheadUrl;
+      if (documents !== undefined && oldLetterhead && oldLetterhead !== documents.letterheadUrl) {
+        await deleteStoredFile(oldLetterhead);
+      }
       updates.settingsConfig = {
-        ...(readTenantSettings(current) as Record<string, unknown>),
-        stockApprovalRequired,
+        ...(settings as Record<string, unknown>),
+        ...(stockApprovalRequired !== undefined ? { stockApprovalRequired } : {}),
+        ...(documents !== undefined ? { documents } : {}),
       };
     }
     if (name !== undefined) updates.name = name;
