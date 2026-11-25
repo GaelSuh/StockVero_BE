@@ -12,6 +12,32 @@ export interface TenantSettings {
    * that relied on it before this default changed was backfilled explicitly.
    */
   stockApprovalRequired?: boolean;
+  /** How receipts, invoices and PDF reports look: set in Settings → Company. */
+  documents?: DocumentSettings;
+}
+
+/**
+ * The company's document format. Every field is optional; documents fall back
+ * to the Modern template and the company name and logo. Colours always come
+ * from the company's theme. A branch's own address and phone, when set, are
+ * printed instead of these.
+ */
+export interface DocumentSettings {
+  template?: 'modern' | 'classic' | 'compact';
+  /** A designed letterhead image printed instead of the logo and details (not on thermal receipts). */
+  letterheadUrl?: string | null;
+  address?: string;
+  phone?: string;
+  /** The email printed on documents; not the account's sign-in email. */
+  email?: string;
+  website?: string;
+  /** NIU (tax identification number). */
+  taxId?: string;
+  /** RCCM (trade register number). */
+  registrationNumber?: string;
+  footerText?: string;
+  /** Full letterhead on page 1 only, a slim header on the pages after. */
+  firstPageOnly?: boolean;
 }
 
 export const readTenantSettings = (tenant: { settingsConfig?: unknown } | null): TenantSettings => {
