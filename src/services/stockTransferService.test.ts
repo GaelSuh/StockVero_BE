@@ -25,7 +25,7 @@ before(async () => {
       name: 'Transfer test',
       subdomain: `transfer-test-${randomUUID().slice(0, 8)}`,
       tenantType: 'TEST',
-      branches: { create: [{ name: 'Yaounde', code: 'YDE', isMain: true }, { name: 'Douala', code: 'DLA' }, { name: 'Kribi', code: 'KRI' }] },
+      branches: { create: [{ name: 'Yaounde', code: 'YDE', isMain: true, approvalStatus: 'APPROVED' }, { name: 'Douala', code: 'DLA', approvalStatus: 'APPROVED' }, { name: 'Kribi', code: 'KRI', approvalStatus: 'APPROVED' }] },
     },
     select: { id: true, branches: { select: { id: true, code: true } } },
   });

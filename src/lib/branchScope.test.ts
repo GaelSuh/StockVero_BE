@@ -30,8 +30,8 @@ before(async () => {
       tenantType: 'TEST',
       branches: {
         create: [
-          { name: 'Branch A', code: 'A', isMain: true },
-          { name: 'Branch B', code: 'B' },
+          { name: 'Branch A', code: 'A', isMain: true, approvalStatus: 'APPROVED' },
+          { name: 'Branch B', code: 'B', approvalStatus: 'APPROVED' },
         ],
       },
     },

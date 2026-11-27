@@ -19,7 +19,7 @@ before(async () => {
       name: 'Import test',
       subdomain: `import-test-${randomUUID().slice(0, 8)}`,
       tenantType: 'TEST',
-      branches: { create: [{ name: 'Source', code: 'SRC', isMain: true }, { name: 'Target', code: 'TGT' }] },
+      branches: { create: [{ name: 'Source', code: 'SRC', isMain: true, approvalStatus: 'APPROVED' }, { name: 'Target', code: 'TGT', approvalStatus: 'APPROVED' }] },
     },
     select: { id: true, branches: { select: { id: true, code: true } } },
   });
