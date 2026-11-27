@@ -19,7 +19,7 @@ before(async () => {
       name: 'Customer test',
       subdomain: `cust-test-${randomUUID().slice(0, 8)}`,
       tenantType: 'TEST',
-      branches: { create: [{ name: 'Akwa', code: 'A', isMain: true }, { name: 'Bonamoussadi', code: 'B' }] },
+      branches: { create: [{ name: 'Akwa', code: 'A', isMain: true, approvalStatus: 'APPROVED' }, { name: 'Bonamoussadi', code: 'B', approvalStatus: 'APPROVED' }] },
     },
     select: { id: true, branches: { select: { id: true, code: true } } },
   });

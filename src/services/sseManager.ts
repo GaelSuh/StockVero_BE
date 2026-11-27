@@ -21,12 +21,12 @@ export function addConnection(userId: string, tenantId: string, req: Request, re
   });
 
   // Send initial connected event
-  res.write(`data: ${JSON.stringify({ type: 'connected', message: 'SSE connection established' })}\n\n`);
+  send(res, `data: ${JSON.stringify({ type: 'connected', message: 'SSE connection established' })}\n\n`);
 
   // Keepalive every 30 seconds
   const keepaliveInterval = setInterval(() => {
     try {
-      res.write(': keepalive\n\n');
+      send(res, ': keepalive\n\n');
     } catch {
       removeConnection(userId);
     }
@@ -52,7 +52,7 @@ export function pushToUser(userId: string, data: unknown) {
   const conn = connections.get(userId);
   if (!conn) return;
   try {
-    conn.res.write(`data: ${JSON.stringify(data)}\n\n`);
+    send(conn.res, `data: ${JSON.stringify(data)}\n\n`);
   } catch {
     removeConnection(userId);
   }
@@ -70,4 +70,13 @@ export function getConnectionsForTenant(tenantId: string): string[] {
 
 export function getConnectionCount(): number {
   return connections.size;
+}
+
+/**
+ * Writes and flushes: compression() otherwise holds the stream in its buffer,
+ * and events reach the browser late, in batches, or not at all.
+ */
+function send(res: Response, chunk: string) {
+  res.write(chunk);
+  (res as Response & { flush?: () => void }).flush?.();
 }

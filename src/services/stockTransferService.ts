@@ -1,6 +1,7 @@
 import { prismaUnscoped as db } from '../db.js';
 import { ApiError } from '../lib/errors.js';
 import { runInBranchScope } from '../lib/branchScope.js';
+import { OPEN_BRANCH } from '../lib/branchAccess.js';
 import { findProductElsewhere } from './branchCopyService.js';
 import { broadcastToModule } from './notificationService.js';
 
@@ -89,7 +90,7 @@ export async function transferSources(tenantId: string, branchId: string, produc
   assertTransferable(product);
   const [branches, matches] = await Promise.all([
     db.branch.findMany({
-      where: { tenantId, isActive: true, id: { not: branchId } },
+      where: { tenantId, ...OPEN_BRANCH, id: { not: branchId } },
       select: { id: true, name: true, code: true },
       orderBy: [{ isMain: 'desc' }, { name: 'asc' }],
     }),
@@ -127,7 +128,7 @@ export async function requestTransfer(
 
   const [mine, fromBranch] = await Promise.all([
     db.inventoryCategory.findFirst({ where: { id: input.productId, tenantId, branchId: toBranchId }, select: productSelect }),
-    db.branch.findFirst({ where: { id: input.fromBranchId, tenantId, isActive: true }, select: { id: true, name: true } }),
+    db.branch.findFirst({ where: { id: input.fromBranchId, tenantId, ...OPEN_BRANCH }, select: { id: true, name: true } }),
   ]);
   if (!mine) throw new ApiError(404, 'Product not found.', 'PRODUCT_NOT_FOUND');
   if (!fromBranch) throw new ApiError(404, 'Branch not found.', 'BRANCH_NOT_FOUND');

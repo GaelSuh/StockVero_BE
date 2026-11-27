@@ -130,20 +130,28 @@ model Tenant {
 /// carries a required branchId; company data (roles, users, modules, settings,
 /// number sequences) does not. Request scoping lives in src/lib/branchScope.ts.
 model Branch {
-  id        String   @id @default(uuid())
-  tenantId  String   @map("tenant_id")
-  name      String
+  id              String               @id @default(uuid())
+  tenantId        String               @map("tenant_id")
+  name            String
   /// Short code printed on documents, e.g. "LAG". Unique per tenant.
-  code      String
-  address   String?
-  phone     String?
-  isMain    Boolean  @default(false) @map("is_main")
+  code            String
+  address         String?
+  phone           String?
+  isMain          Boolean              @default(false) @map("is_main")
   /// Inactive branches keep their data (readable in All branches) but nobody
   /// can sign in to them. The main branch can never be deactivated.
-  isActive  Boolean  @default(true) @map("is_active")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  isActive        Boolean              @default(true) @map("is_active")
+  /// A new branch waits for a StockVero admin: until APPROVED nobody can sign in
+  /// to it or switch to it (the owner can still set it up and add staff). Main
+  /// branches, and every branch from before approval existed, are APPROVED.
+  approvalStatus  BranchApprovalStatus @default(PENDING) @map("approval_status")
+  approvedAt      DateTime?            @map("approved_at")
+  /// The SuperAdmin who approved or rejected it.
+  reviewedBy      String?              @map("reviewed_by")
+  rejectionReason String?              @map("rejection_reason")
+  createdAt       DateTime             @default(now()) @map("created_at")
+  updatedAt       DateTime             @updatedAt @map("updated_at")
+  tenant          Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   employees                  Employee[]
   branchAccess               BranchAccess[]
@@ -183,6 +191,7 @@ model Branch {
   @@unique([tenantId, name])
   @@unique([tenantId], where: raw("is_main"), map: "branches_one_main_per_tenant")
   @@index([tenantId])
+  @@index([approvalStatus])
   @@map("branches")
 }
 
@@ -2192,4 +2201,10 @@ enum StockTransferStatus {
   RECEIVED
   REJECTED
   CANCELLED
+}
+
+enum BranchApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
 }

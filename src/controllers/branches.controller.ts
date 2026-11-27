@@ -6,6 +6,7 @@ import { ApiError } from '../lib/errors.js';
 import { branchPayload } from '../lib/branchAccess.js';
 import { assignableRole } from '../lib/branchAdmin.js';
 import { logAudit, extractRequestContext, buildDiff, AuditActorType } from '../services/auditService.js';
+import { emailBranchEvent } from '../services/branchEmails.js';
 
 /**
  * Branch management. Opening, editing and closing branches, and giving people
@@ -43,6 +44,7 @@ const AccessSchema = z.object({
 
 const branchSelect = {
   id: true, name: true, code: true, address: true, phone: true, isMain: true, isActive: true, createdAt: true,
+  approvalStatus: true, rejectionReason: true,
   _count: { select: { employees: true, branchAccess: true } },
 } as const;
 
@@ -142,6 +144,7 @@ export const createBranch = async (req: AuthRequest, res: Response) => {
       select: branchSelect,
     });
     audit(req, 'BRANCH_CREATED', branch.id, `${branch.name} (${branch.code})`);
+    emailBranchEvent(branch.id, { kind: 'requested', creator: { id: req.user!.id, type: req.user!.accountType } });
     return res.status(201).json({ success: true, data: branch });
   } catch (error) {
     return fail(res, error, 'create the branch');

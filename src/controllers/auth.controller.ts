@@ -348,7 +348,7 @@ export const signup = async (req: Request, res: Response) => {
         name: organizationName,
         subdomain,
         // Every tenant starts with its main branch; more can be opened later.
-        branches: { create: { name: MAIN_BRANCH_NAME, code: MAIN_BRANCH_CODE, isMain: true } },
+        branches: { create: { name: MAIN_BRANCH_NAME, code: MAIN_BRANCH_CODE, isMain: true, approvalStatus: 'APPROVED', approvedAt: new Date() } },
         industry: storedIndustry,
         organizationType: (resolvedOrgType as any) ?? undefined,
         website: website || null,
@@ -789,6 +789,17 @@ export const login = async (req: Request, res: Response) => {
     const enabledModules = Array.from(new Set([...OWNER_PERMANENT_MODULES, ...employee.tenant.modules.filter(m => m.isEnabled).map(m => m.moduleKey)]));
     // The employee signs in to their own branch; a closed branch admits nobody.
     if (!(await resolveEmployeeBranch({ id: employee.id, branchId: employee.branchId }, null))) {
+      const home = await prisma.branch.findUnique({ where: { id: employee.branchId }, select: { approvalStatus: true } });
+      // A new branch is closed until a StockVero admin approves it.
+      if (home && home.approvalStatus !== 'APPROVED') {
+        return res.status(403).json({
+          success: false,
+          code: 'BRANCH_PENDING_APPROVAL',
+          message: home.approvalStatus === 'REJECTED'
+            ? 'Your branch was not approved. Ask the business owner.'
+            : 'Your branch is waiting for approval by StockVero. You can sign in once it is approved.',
+        });
+      }
       return res.status(403).json({
         success: false,
         code: 'BRANCH_INACTIVE',
@@ -2058,7 +2069,7 @@ export const resetPassword = async (req: Request, res: Response) => {
     });
   }
 };
-
+
 /**
  * POST /auth/switch-branch — move this session to another branch (or, for an
  * owner, to the All branches view). Answers with a new token whose permissions
@@ -2079,6 +2090,17 @@ export const switchBranch = async (req: AuthRequest, res: Response) => {
       if (!user) return res.status(404).json({ success: false, message: 'User not found' });
       const branchId = await resolveOwnerBranch(user.tenantId, target);
       if (branchId === undefined) {
+        const pending = await prisma.branch.findFirst({
+          where: { id: target, tenantId: user.tenantId, approvalStatus: { not: 'APPROVED' } },
+          select: { id: true },
+        });
+        if (pending) {
+          return res.status(403).json({
+            success: false,
+            code: 'BRANCH_PENDING_APPROVAL',
+            message: 'This branch is waiting for approval by StockVero. You can open it once it is approved.',
+          });
+        }
         return res.status(403).json({ success: false, code: 'BRANCH_ACCESS_DENIED', message: 'You do not have access to this branch.' });
       }
       const activeModules = Array.from(new Set([...OWNER_PERMANENT_MODULES, ...user.tenant.modules.filter(m => m.isEnabled).map(m => m.moduleKey)]));
