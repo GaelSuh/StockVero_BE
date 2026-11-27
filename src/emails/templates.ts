@@ -148,3 +148,22 @@ export function subscriptionCancelled(params: { ownerName: string; orgName: stri
   const body = `Hi ${ownerName}, your subscription for ${orgName} has been cancelled. You will continue to have access until ${accessEndsAt}. After that your account will be deactivated.`;
   return baseTemplate('Your StockVero subscription has been cancelled', body);
 }
+// ── Branches: a new branch waits for StockVero's approval ─────────────────────
+
+export function branchRequested(params: { name: string; orgName: string; branchName: string }): string {
+  const { name, orgName, branchName } = params;
+  const body = `Hi ${name}, the branch ${branchName} was added to ${orgName}. StockVero will review it shortly. You can already set it up and add staff, but nobody can sign in to it until it is approved. We will email you as soon as it is.`;
+  return baseTemplate(`Your new branch ${branchName} is waiting for approval`, body);
+}
+
+export function branchApproved(params: { name: string; orgName: string; branchName: string; loginUrl?: string }): string {
+  const { name, orgName, branchName, loginUrl } = params;
+  const body = `Hi ${name}, good news: the branch ${branchName} of ${orgName} has been approved. You and its staff can now sign in to it and start working there.`;
+  return baseTemplate(`Your branch ${branchName} has been approved`, body, loginUrl, 'Open StockVero');
+}
+
+export function branchRejected(params: { name: string; orgName: string; branchName: string; reason: string }): string {
+  const { name, orgName, branchName, reason } = params;
+  const body = `Hi ${name}, we were unable to approve the branch ${branchName} of ${orgName}. Reason: ${reason}. Nobody can sign in to it. If you believe this is a mistake, please contact our support team.`;
+  return baseTemplate(`Update on your branch ${branchName}`, body);
+}

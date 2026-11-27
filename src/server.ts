@@ -1,3 +1,4 @@
+import { announceChanges } from './services/changeFeed.js';
 import express, { Express, Request, Response } from 'express';
 import cors from 'cors';
 import 'dotenv/config';
@@ -70,6 +71,8 @@ app.use(express.json({ limit: '2mb' }));
 
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
+// Announces every successful write to the company's open sessions (cache refresh).
+app.use(announceChanges);
 app.use('/api/v1/auth', authLimiter, authRoutes);
 app.use('/api/v1/inventory', apiLimiter, inventoryRoutes);
 app.use('/api/v1/crm', apiLimiter, crmRoutes);

@@ -243,7 +243,7 @@ export const createTenant = async (req: AdminRequest, res: Response) => {
         data: {
           name: data.name.trim(),
           subdomain: slug,
-          branches: { create: { name: MAIN_BRANCH_NAME, code: MAIN_BRANCH_CODE, isMain: true } },
+          branches: { create: { name: MAIN_BRANCH_NAME, code: MAIN_BRANCH_CODE, isMain: true, approvalStatus: 'APPROVED', approvedAt: new Date() } },
           industry: data.industry?.trim() || null,
           website: data.website?.trim() || null,
           phone: data.phone?.trim() || null,

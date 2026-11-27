@@ -8,6 +8,7 @@ import adminAdminsRoutes from './admins.js';
 import adminMetricsRoutes from './metrics.js';
 import adminInsightsRoutes from './insights.js';
 import adminAccountsRoutes from './accounts.js';
+import adminBranchesRoutes from './branches.js';
 
 const router = Router();
 
@@ -15,6 +16,7 @@ router.use(adminAuthRoutes);
 router.use(adminDashboardRoutes);
 router.use(adminAccountsRoutes);
 router.use(adminTenantsRoutes);
+router.use(adminBranchesRoutes);
 router.use(adminAnalyticsRoutes);
 router.use(adminAuditRoutes);
 router.use(adminAdminsRoutes);

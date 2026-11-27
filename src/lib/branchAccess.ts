@@ -11,8 +11,22 @@ export const ALL_BRANCHES = 'all';
 /** Header the client sends to pin a request to a branch (offline replays use it). */
 export const BRANCH_HEADER = 'x-branch-id';
 
-const summarySelect = { id: true, name: true, code: true, isMain: true, isActive: true } as const;
-export type BranchSummary = { id: string; name: string; code: string; isMain: boolean; isActive: boolean };
+// address and phone ride along so documents (receipts, invoices) can print
+// the issuing branch's own details.
+const summarySelect = { id: true, name: true, code: true, isMain: true, isActive: true, approvalStatus: true, address: true, phone: true } as const;
+export type BranchSummary = {
+  id: string; name: string; code: string; isMain: boolean; isActive: boolean;
+  approvalStatus: 'PENDING' | 'APPROVED' | 'REJECTED';
+  address: string | null; phone: string | null;
+};
+
+/**
+ * A branch people can sign in to and work in: open, and approved by a StockVero
+ * admin. Until then the owner can set it up from the main branch, nobody enters.
+ */
+export const OPEN_BRANCH = { isActive: true, approvalStatus: 'APPROVED' } as const;
+const isOpen = (b: { isActive: boolean; approvalStatus: string } | null | undefined) =>
+  Boolean(b?.isActive && b.approvalStatus === 'APPROVED');
 
 /**
  * The branch to keep in a token re-issued during a session (profile update,
@@ -36,17 +50,17 @@ export function branchesForOwner(tenantId: string): Promise<BranchSummary[]> {
   });
 }
 
-/** The employee's own branch plus any active branch they were given access to. */
+/** The employee's own branch plus any open branch they were given access to. */
 export async function branchesForEmployee(employee: { id: string; branchId: string }): Promise<BranchSummary[]> {
   const [home, extra] = await Promise.all([
     db.branch.findUnique({ where: { id: employee.branchId }, select: summarySelect }),
     db.branchAccess.findMany({
-      where: { employeeId: employee.id, branch: { isActive: true } },
+      where: { employeeId: employee.id, branch: OPEN_BRANCH },
       select: { branch: { select: summarySelect } },
       orderBy: { branch: { name: 'asc' } },
     }),
   ]);
-  return [...(home?.isActive ? [home] : []), ...extra.map((a) => a.branch)];
+  return [...(isOpen(home) ? [home!] : []), ...extra.map((a) => a.branch)];
 }
 
 /**
@@ -60,7 +74,7 @@ export async function resolveOwnerBranch(
 ): Promise<string | null | undefined> {
   if (requested === ALL_BRANCHES) return null;
   const branch = requested
-    ? await db.branch.findFirst({ where: { id: requested, tenantId }, select: { id: true } })
+    ? await db.branch.findFirst({ where: { id: requested, tenantId, approvalStatus: 'APPROVED' }, select: { id: true } })
     : await mainBranch(tenantId);
   return branch?.id;
 }
@@ -74,8 +88,8 @@ export type EmployeeBranch = {
 /**
  * The branch an employee works in for this request, or null when they may not
  * open the requested one. Their own branch uses their own role; any other
- * branch needs a BranchAccess row and uses the role on it. Inactive branches
- * are closed to employees.
+ * branch needs a BranchAccess row and uses the role on it. Inactive and
+ * not-yet-approved branches are closed to employees.
  */
 export async function resolveEmployeeBranch(
   employee: { id: string; branchId: string },
@@ -84,18 +98,18 @@ export async function resolveEmployeeBranch(
   if (requested === ALL_BRANCHES) return null;
 
   if (!requested || requested === employee.branchId) {
-    const home = await db.branch.findUnique({ where: { id: employee.branchId }, select: { isActive: true } });
-    return home?.isActive ? { branchId: employee.branchId } : null;
+    const home = await db.branch.findUnique({ where: { id: employee.branchId }, select: { isActive: true, approvalStatus: true } });
+    return isOpen(home) ? { branchId: employee.branchId } : null;
   }
 
   const access = await db.branchAccess.findUnique({
     where: { employeeId_branchId: { employeeId: employee.id, branchId: requested } },
     select: {
-      branch: { select: { isActive: true } },
+      branch: { select: { isActive: true, approvalStatus: true } },
       role: { select: { id: true, isAdmin: true, permissions: true } },
     },
   });
-  if (!access || !access.branch.isActive) return null;
+  if (!access || !isOpen(access.branch)) return null;
   return { branchId: requested, accessRole: access.role };
 }
 
@@ -125,11 +139,17 @@ export async function branchPayload(
   account: { accountType: 'owner' | 'employee'; tenantId: string; employeeId?: string; homeBranchId?: string },
   activeBranchId: string | null,
 ) {
-  const branches = account.accountType === 'owner'
-    ? await branchesForOwner(account.tenantId)
-    : await branchesForEmployee({ id: account.employeeId!, branchId: account.homeBranchId! });
+  const [branches, companyBranchCount] = await Promise.all([
+    account.accountType === 'owner'
+      ? branchesForOwner(account.tenantId)
+      : branchesForEmployee({ id: account.employeeId!, branchId: account.homeBranchId! }),
+    // How many working branches the company has, which an employee's own list
+    // does not show: one means the app shows no branch names at all.
+    db.branch.count({ where: { tenantId: account.tenantId, approvalStatus: 'APPROVED' } }),
+  ]);
   return {
     branches,
+    companyBranchCount,
     activeBranch: activeBranchId ? branches.find((b) => b.id === activeBranchId) ?? null : null,
     homeBranchId: account.homeBranchId ?? null,
   };
